@@ -145,12 +145,17 @@ impl UraFileWatcher {
             match self.rx.recv() {
                 Ok(Ok(event)) if matches!(event.kind, EventKind::Create(_) | EventKind::Modify(_)) => {
                     let relevant = event.paths.iter().any(|p| p == full_path);
-                    // 排空队列：处理期间积压的多次写入合并成一次（只取最新内容）
-                    while matches!(self.rx.try_recv(), Ok(Ok(_))) {}
                     if relevant {
+                        // 仅确认是本文件事件时才排空：把处理期间积压的同类（快写）事件
+                        // 合并成一次，上层重读文件只取最新内容。绝对不能在 relevant == false
+                        // 时排空——目录里还有 SendGameStatusPlugin 写的 game*.json 等其它文件，
+                        // 收到它们的事件可能 precede 本文件事件，排空会把后面排队的
+                        // thisTurn.json 事件一起吞掉，导致 recv() 永久阻塞（表现为
+                        // "每次重启只算一回合，之后不再响应"）。
+                        while matches!(self.rx.try_recv(), Ok(Ok(_))) {}
                         return Ok(());
                     }
-                    // 不相关路径的事件 → 忽略继续等
+                    // 不相关路径的事件 → 忽略继续等（不动队列）
                 }
                 Ok(Ok(_)) => {} // 其他事件类型（Remove/Rename/Access 等）忽略
                 Ok(Err(_)) => {
@@ -221,4 +226,43 @@ pub fn parse_game<S: GameStatus>(contents: &str) -> Result<S::Game> {
     status
         .into_game()
         .map_err(|e| format_err("载入回合出错".to_string(), e))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use notify::event::ModifyKind;
+
+    /// 回归测试：`wait_event` 收到不相关文件（如 game*.json）的事件后，
+    /// 绝不能把队列里排队的本文件（thisTurn.json）事件排空吞掉。
+    ///
+    /// 修复前：不相关事件 → `relevant == false` → 无条件排空 → 吞掉随后排队的
+    /// 相关事件 → 继续 `recv()` 永久阻塞（表现为 AI"每次重启只算一回合"）。
+    #[test]
+    fn wait_event_does_not_swallow_related_event_after_unrelated() {
+        let (tx, rx) = mpsc::channel();
+        let local = notify::recommended_watcher(tx.clone()).unwrap();
+        let mut watcher = UraFileWatcher {
+            watcher: local,
+            rx,
+            contents: String::new()
+        };
+
+        let dir = std::env::temp_dir().join("wait_event_swallow_test");
+        let this_turn_full = dir.join("thisTurn.json");
+        let unrelated = dir.join("game6211_turn1.json");
+
+        let event = |path| notify::Event {
+            kind: EventKind::Modify(ModifyKind::Any),
+            paths: vec![path],
+            attrs: notify::event::EventAttributes::default()
+        };
+        // 实际游戏顺序：SendGameStatusPlugin 先写 game*.json（不相关），
+        // 随后原子替换 thisTurn.json（相关）——两个事件几乎同时进队列。
+        tx.send(Ok(event(unrelated))).unwrap();
+        tx.send(Ok(event(this_turn_full.clone()))).unwrap();
+
+        // 修复后应正常返回；若修复被回退（相关事件被吞），这里会永久阻塞。
+        watcher.wait_event(&this_turn_full).expect("wait_event 应返回 Ok");
+    }
 }
