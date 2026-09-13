@@ -2,7 +2,9 @@ use std::{
     env,
     fmt::Debug,
     path::Path,
-    sync::mpsc::{self, Receiver}
+    sync::mpsc::{self, Receiver},
+    thread,
+    time::Duration
 };
 
 use anyhow::{Result, anyhow};
@@ -100,41 +102,99 @@ impl UraFileWatcher {
         })
     }
 
-    /// 捕获指定文件修改时的内容
-    pub fn do_poll(&mut self, filename: &str) -> Result<String> {
-        let full_path = Path::new(&Self::plugin_dir()?).join(filename);
-        loop {
-            let event = self.rx.recv()??;
-            if event.paths.contains(&full_path) && matches!(event.kind, EventKind::Create(_) | EventKind::Modify(_)) {
-                if full_path.exists() {
-                    // sanity check
-                    let contents = fs_err::read_to_string(&full_path)?;
-                    return Ok(contents);
-                }
-            }
-        }
-    }
-
     /// 等待直到指定文件内容改变
+    ///
+    /// **健壮性（2026-09）**：修复快速连续写入（上一回合还没算完、下一回合数据已更新）
+    /// 时 AI 收不到计算结果的两个问题：
+    /// 1. notify 事件缓冲溢出（Windows 上快速写入常见）会上报错误事件——旧实现
+    ///    把错误 `?` 出去直接让进程退出；现在当作"可能错过了事件"醒来重读文件校验内容；
+    /// 2. 写入中读取可能拿到空 / 半截 JSON——旧实现拿到半截内容就返回，主循环解析失败
+    ///    后事件已被消费，下一次 `recv()` 永久阻塞（C# 端表现为收不到 decision / compute_done，
+    ///    重启 AI 才恢复）。现在带重试 + 两次一致校验，只返回稳定快照；
+    /// 3. 唤醒后排空队列里积压的同类事件——处理期间多次写入合并为一次读取最新内容，
+    ///    避免处理中间快照浪费 MCTS 计算。
     pub fn watch(&mut self, filename: &str) -> Result<String> {
         let full_path = Path::new(&Self::plugin_dir()?).join(filename);
         // 初始化时尝试直接读取文件内容
         if self.contents.is_empty() && full_path.exists() {
-            let contents = fs_err::read_to_string(&full_path)
-                .map_err(|e| format_err(format!("读取 {filename} 出错，请检查小黑板通信"), e))?;
-            self.contents = contents.clone();
-            return Ok(contents);
+            if let Ok(contents) = self.read_stable(&full_path) {
+                self.contents = contents.clone();
+                return Ok(contents);
+            }
+            // 写入中拿不到稳定快照 → 落到下方事件等待循环
         }
         loop {
-            // 之后在变更时读取
-            let contents = self
-                .do_poll(filename)
-                .map_err(|e| format_err(format!("监听 {filename} 出错，请检查小黑板通信"), e))?;
+            // 等待本文件的写事件；notify 错误（缓冲溢出等）也当作"可能错过事件"醒来
+            self.wait_event(&full_path)?;
+            // 无论因何醒来都重新读文件：内容变了才返回（合并快速连续写入）
+            let contents = self.read_stable(&full_path)?;
             if contents != self.contents {
                 self.contents = contents.clone();
                 return Ok(contents);
             }
+            // 内容未变（事件是覆盖写回原值等）→ 继续等下一个事件
         }
+    }
+
+    /// 等待本文件的下一个写事件；随后排空队列中积压的同类事件。
+    ///
+    /// notify 的错误事件（Windows 下快速写入导致缓冲溢出时以错误形式上报）不抛错，
+    /// 直接返回让上层重读文件校验内容——避免事件丢失后永久阻塞在 `recv()`。
+    fn wait_event(&mut self, full_path: &Path) -> Result<()> {
+        loop {
+            match self.rx.recv() {
+                Ok(Ok(event)) if matches!(event.kind, EventKind::Create(_) | EventKind::Modify(_)) => {
+                    let relevant = event.paths.iter().any(|p| p == full_path);
+                    // 排空队列：处理期间积压的多次写入合并成一次（只取最新内容）
+                    while matches!(self.rx.try_recv(), Ok(Ok(_))) {}
+                    if relevant {
+                        return Ok(());
+                    }
+                    // 不相关路径的事件 → 忽略继续等
+                }
+                Ok(Ok(_)) => {} // 其他事件类型（Remove/Rename/Access 等）忽略
+                Ok(Err(_)) => {
+                    // 缓冲溢出等瞬时错误：事件可能已丢失，返回让上层重读文件
+                    return Ok(());
+                }
+                Err(_) => return Err(anyhow!("文件监听通道已关闭")),
+            }
+        }
+    }
+
+    /// 稳定读取：写入中可能读到空 / 半截内容或撞上文件锁，带重试 + 两次一致校验。
+    ///
+    /// 重试耗尽时返回最后一次成功读取的内容（比抛错让进程退出更宽容，最坏情况是
+    /// 主循环解析失败后等待下一个事件）；一次都没读到才报错。
+    const READ_STABLE_ATTEMPTS: usize = 10;
+    const READ_STABLE_INTERVAL: Duration = Duration::from_millis(50);
+
+    fn read_stable(&self, full_path: &Path) -> Result<String> {
+        let mut last_ok: Option<String> = None;
+        for _ in 0..Self::READ_STABLE_ATTEMPTS {
+            match fs_err::read_to_string(full_path) {
+                Ok(contents) => {
+                    if contents.is_empty() {
+                        // 空文件 = 正被 truncate 写入中
+                        thread::sleep(Self::READ_STABLE_INTERVAL);
+                        continue;
+                    }
+                    if let Some(prev) = &last_ok {
+                        if prev == &contents {
+                            // 两次读取一致 → 写入完成，快照稳定
+                            return Ok(contents);
+                        }
+                    }
+                    last_ok = Some(contents);
+                    thread::sleep(Self::READ_STABLE_INTERVAL);
+                }
+                Err(_) => {
+                    // 文件被独占打开等瞬时错误：重试
+                    thread::sleep(Self::READ_STABLE_INTERVAL);
+                }
+            }
+        }
+        last_ok.ok_or_else(|| anyhow!("多次读取 {} 失败（文件可能持续被写入）", full_path.display()))
     }
 }
 
