@@ -1704,6 +1704,10 @@ impl RecommendedRamenTrainer {
     ///
     /// 吃面事务门、体力硬门、友人 0/2/5 节奏、动态事件、隐藏风味等结构逻辑
     /// 均逐字继承 `new()`，防止实验候选混入未声明的策略差异。
+    ///
+    /// `region_weak_cover_weight` 走三态语义（见
+    /// [`RamenPolicy::effective_region_weak_cover`]）：`0.0`=按智卡数查表（方案Ⅰ，
+    /// 与 preset 默认一致）、`<0.0`=显式关闭（老行为）、`>0.0`=固定值（实验）。
     pub fn with_experiment_overrides(
         pt_rates: [f32; 3],
         gap_strength: f32,
@@ -1733,6 +1737,38 @@ impl RecommendedRamenTrainer {
             year.config.eat_requires_covered_train = eat_requires_covered_train;
         }
         trainer
+    }
+
+    /// 地区打分权重覆盖（三年统一；`None` = 保持 preset 值）。
+    ///
+    /// 只覆盖地区选择相关权重，其余策略参数逐字继承 `new()`。
+    /// `youqing_weight` 对应 [`RamenPolicyConfig::region_youqing_weight`]（卡组构成×友情词条），
+    /// `waste_penalty` 对应 [`RamenPolicyConfig::region_waste_penalty`]（覆盖无卡位惩罚），
+    /// `weak_cover_weight` 三态语义同 `with_experiment_overrides` 的第 10 参数
+    /// （`None` = preset 默认按智卡数查表），
+    /// `main_bias_bonus` 对应 [`RamenPolicyConfig::region_main_bias_bonus`]（C2 主训位翻倍）。
+    pub fn with_region_weights(
+        mut self,
+        youqing_weight: Option<f32>,
+        waste_penalty: Option<f32>,
+        weak_cover_weight: Option<f32>,
+        main_bias_bonus: Option<f32>,
+    ) -> Self {
+        for year in self.years.iter_mut() {
+            if let Some(v) = youqing_weight {
+                year.policy.config.region_youqing_weight = v;
+            }
+            if let Some(v) = waste_penalty {
+                year.policy.config.region_waste_penalty = v;
+            }
+            if let Some(v) = weak_cover_weight {
+                year.policy.config.region_weak_cover_weight = v;
+            }
+            if let Some(v) = main_bias_bonus {
+                year.policy.config.region_main_bias_bonus = v;
+            }
+        }
+        self
     }
 
     /// EXP-006c：从 token 串构造 preset 变体（逐 token 覆盖三年同配置）。
