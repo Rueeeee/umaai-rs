@@ -623,7 +623,7 @@ pub struct GameConfig {
     ///
     /// 例如 `[[10, 12, 14]]`：第3年固定选 [10,12,14]
     #[serde(default)]
-    pub ramen_region_fixed: Option<Vec<[usize; 3]>>
+    pub ramen_region_fixed: Option<Vec<[usize; 3]>>,
 }
 
 fn default_mcts_turn_bonus() -> i32 {
@@ -631,7 +631,7 @@ fn default_mcts_turn_bonus() -> i32 {
 }
 
 fn default_pt_favor_rate() -> f32 {
-    8.0
+    1.0
 }
 
 fn default_race_grades() -> Vec<i32> {
@@ -859,7 +859,7 @@ pub struct OverrideGameConfig {
     /// `None` = 不覆盖 default；写 `ramen_region_fixed = [[.., .., ..]]` 即覆盖；
     /// 要显式清空 default 的 fixed 组合可写空数组 `[]`。
     #[serde(default)]
-    pub ramen_region_fixed: Option<Vec<[usize; 3]>>
+    pub ramen_region_fixed: Option<Vec<[usize; 3]>>,
 }
 
 /// MCTS 覆盖配置：每个字段都是可选覆盖（`None` = 不覆盖 `default_config.toml`）。
@@ -1089,7 +1089,7 @@ mod tests {
             config_override: cfg,
             mcts: OverrideMctsConfig::default(),
             ramen_region_strategy: None,
-            ramen_region_fixed: None
+            ramen_region_fixed: None,
         }
     }
 

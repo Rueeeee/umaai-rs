@@ -456,7 +456,7 @@ pub(crate) fn fallback_override_game_config() -> OverrideGameConfig {
         },
         mcts: OverrideMctsConfig::default(),
         ramen_region_strategy: None,
-        ramen_region_fixed: None
+        ramen_region_fixed: None,
     }
 }
 
