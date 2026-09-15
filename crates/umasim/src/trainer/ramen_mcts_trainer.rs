@@ -203,7 +203,13 @@ impl Default for RamenSearchStages {
 struct LastSearchSummary {
     /// 中选者在 `action_results` 中的下标
     chosen_idx: usize,
-    /// 全候选分数（按 action_results 顺序）
+    /// 全候选分数（按 action_results 顺序，**真实评分口径**——`SearchScore::score`
+    /// 即 `calc_score()`，不含 `pt_favor_rate` 缩放）
+    ///
+    /// 选择动作走 `score_pt` 轴（`best_action_pt_idx`），但**展示与运气分口径固定为
+    /// 真实评分**：`candidate_scores` 会经 `emit_with_luck_decision` 换算 T(n)
+    /// baseline 得出运气分，若在此处取被 `pt_favor_rate` 放大的 `score_pt`，运气分
+    /// （以及 AIRed 显示的候选分）会随该系数虚增、不再反映真实评分得失。
     scores: Vec<f64>,
     /// 全候选的 rollout 样本数（按 action_results 顺序）
     counts: Vec<u32>,
@@ -529,11 +535,19 @@ fn emit_decision_reason(&self, turn: i32, chosen: usize, output: &RamenSearchOut
     /// 仅缓存决策协议需要的字段（分数 / 局数 / 选中下标 + 候选描述），不复制整个
     /// [`RamenSearchOutput`]——`ActionResult.distribution` 数组 clone 成本过大。
     ///
+    /// **分数口径 = 真实评分**（`SearchScore::score` / `calc_score()`）：本摘要供
+    /// `last_decision()` → `candidate_scores` → 运气分 baseline 与 AIRed 展示使用，
+    /// 故不采用被 `pt_favor_rate` 缩放的 `score_pt`（选择口径）。历史上此处误取
+    /// `score_pt`，导致 `pt_favor_rate ≠ 1` 时运气分与显示候选分同步虚增。
+    ///
     /// 2026-09 简化：移除 `reason_text` 计算——`DecisionInfo::reason` 删除后
     /// 该文本不再挂到决策协议。完整 `DecisionReasonData` 改由 `emit_decision_reason`
     /// 通过 `LastReasonSink` 缓存，挂到 `scenario_extra.reason`（main.rs 接线）。
     fn stash_last_summary(&self, output: &RamenSearchOutput, chosen_idx: usize) {
-        let scores: Vec<f64> = output.action_results.iter().map(|(_, pt)| pt.mean()).collect();
+        // **真实评分轴**（`action_results` 是 `(score, score_pt)` 对）：
+        // 取 `.0` 即 `calc_score()`，不含 `pt_favor_rate` 缩放。展示与运气分必须用
+        // 真实评分——动作选择另走 `score_pt`（`best_action_pt_idx`），两者互不影响。
+        let scores: Vec<f64> = output.action_results.iter().map(|(score, _)| score.mean()).collect();
         let counts: Vec<u32> = output.action_results.iter().map(|(s, _)| s.count()).collect();
         // 候选可读描述：与 scores / counts 严格同长同序（按 action_results 顺序）
         let descriptions: Vec<String> = output

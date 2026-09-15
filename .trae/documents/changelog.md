@@ -9,6 +9,10 @@
 - **主训位翻倍加分实验（未采纳）**：`region_main_bias_bonus` 让地区覆盖 build 卡最多位时 bias_sum 再 + 该位卡数，全 101 构成验证全档大负（3speed 类受伤最重），维持线性 bias_sum，字段保留可配
 - **地区打分移除恒量项**：`score_region` 删 pt_bonus/hint_count 项（同年候选间恒定，不改变 argmax，验证逐位不变），删除孤儿字段 `region_pt_weight`；`region_hint_weight` 保留供吃面选择路径
 - **地区权重扫描入口**：`bench_compositions` 新增 recommended 档（正式推荐 preset）与 `--region-weak-cover / --region-youqing-weight / --region-waste-penalty / --region-main-bias` 参数；`RecommendedRamenTrainer::with_region_weights` 覆盖入口
+- **MCTS pt_favor_rate 扫参定档 2.0**：1.0~12.0 七档 N=1024 扫参（2.0~3.0 免费换 PT、4.0 起转亏、PT 增益 8.0 后饱和）+ 1.0/2.0/2.5 三档 N=4096 深测（5 速系卡组 10 局配对：2.0 评分损失不显著 t=−0.04、PT 增益显著 t=+6.3，2.5 边际仅多 +41pt）；正式默认 1.0→2.0，新增扫参汇总/绘图脚本
+- **拉面 MCTS 决策候选分改真实评分**：`stash_last_summary` 缓存 `candidate_scores` 从 score_pt 轴（含 pt_favor_rate 缩放）改为 calc_score 轴——运气分 baseline、action_luck 与 AIRed 候选显示不再随 pt_favor_rate 虚增；选择仍走 score_pt 不变
+- **urafile 读取改生产者-消费者模型（用户）**：thisTurn.json 监听从「收到事件后合并排空 + contents 去重」改为后台 producer 线程每次写事件读完整 JSON 进异步队列、主循环逐个消费——取消主观丢弃中间回合快照的路径（内容相同的冗余事件除外），notify 缓冲溢出错误事件改重读兜底
+- **清理多余配置（用户）**：删除遗留 constants 快照文件；ramen_turn_inspect 展示同步 RamenMctsTrainer 字段变更（selection → use_combined_ramen_select）
 
 ## 2026-09-14
 - **拉面手写策略评分换PT参数**：新增可调已满位训练 PT 折算价（`pt_tradeoff` 普通档 / `pt_tradeoff_shining` 有彩圈分级 / `pt_tradeoff_super` 超拉面档）——训练位主属性已满时属性收益为 0、只剩 PT，策略按独立价重估该训练候选，避免按 `pt_rate` 高估后终盘贪练已满位

@@ -12,15 +12,18 @@ ramen_region_strategy = "all"   # "all"（默认）/"fixed"（仅第3年，跳�
 
 # ---------- 常用区：[config_override] 段 ----------
 [config_override]
-uma = 101901
-cards = [302754, 303124, 303044, 302814, 303064, 303054]
-blue_count = [15, 0, 0, 0, 3]
+# PT 重视程度 (1.0-8.0), 1.0为最重视评分, 8.0会用~3000评分换~400pt
+# 默认为2.0(2-3速最优配置), 速卡少时需回调到1.0
+pt_favor_rate = 2.0
 # 种马额外属性 [速度, 耐力, 力量, 根性, 智力, 技能点]
 extra_count = [0, 10, 20, 40, 40, 40]
 log_level = "info"
-
 # 线程数（建议 = CPU 核心数；特定处理器如 Intel 14900k 若崩溃/蓝屏可改为 8）
 num_threads = 16
+
+uma = 101901
+cards = [302754, 303124, 303044, 302814, 303064, 303054]
+blue_count = [15, 0, 0, 0, 3]
 
 # 训练员类型（可选覆盖 default_config.toml 的 trainer）
 # "manual" | "random" | "handwritten" | "collector" | "neuralnet" | "mcts"

@@ -631,7 +631,8 @@ fn default_mcts_turn_bonus() -> i32 {
 }
 
 fn default_pt_favor_rate() -> f32 {
-    1.0
+    // 与 gamedata/default_config.toml 保持一致（2.0 = 2026-09-15 扫参 + N=4096 深测定档）
+    2.0
 }
 
 fn default_race_grades() -> Vec<i32> {
