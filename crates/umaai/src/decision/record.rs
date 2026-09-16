@@ -7,7 +7,9 @@
 //!
 //! - `game{id}_turn{turn}[_{seq}].json`：watch 收到的 `thisTurn.json` **原文**（每份一文件，写完即关）
 //! - `decisions.csv`：逐决策点明细（与离线 `luck_replay` 同 schema，逐行写盘即时 flush）
-//! - `meta.json`：局元信息（起止时间 / 起始回合 / 中途接入标记 / 终局运气分等），切局或退出时收尾
+//! - `meta.json`：局元信息（起止时间 / 起始回合 / 中途接入标记 / 终局运气分等），
+//!   **末回合第 2 份快照（拉面 `turn77_2`，含决策行那份）处理完时写**（`end_reason=game_end`）；
+//!   中途停止 / 未触发末回合的局由切局 / 退出兜底补写（`switch` / `process_exit`）
 //!
 //! 通过全局 [`RECORDER`]（`OnceLock<Mutex<Option<OnlineRecorder>>>`）访问：
 //! `init` **之前所有入口为 no-op**——离线工具（`luck_replay` / `luck_probe` / bench）与
@@ -89,7 +91,20 @@ pub fn on_emit(info: &DecisionInfo, view: &GameView) {
     }
 }
 
-/// 进程退出 / 收尾入口：把当前局收尾（补 `no_emit` 行 + 写 `meta.json`）
+/// 一份快照处理完成后的入口（main 在 `process_ramen` 返回后调用）
+///
+/// 若刚处理的是**末回合第 2 份快照**（如拉面 `turn77_2`，含决策行的那份）——
+/// 其决策行已全部落盘，这里立即写 `meta.json`（`end_reason=game_end`）并生成
+/// `luck_trend.svg`，不必等切局 / 进程退出（那两者只作后续兜底）。
+pub fn on_turn_done() {
+    let Some(r) = RECORDER.get() else { return };
+    let Ok(mut g) = r.lock() else { return };
+    if let Some(rec) = g.as_mut() {
+        rec.handle_turn_done();
+    }
+}
+
+/// 进程退出 / 收尾入口：把当前局收尾（补 `no_emit` 行；末回合未出图的局补 meta + SVG）
 pub fn finalize_shutdown() {
     let Some(r) = RECORDER.get() else { return };
     let Ok(mut g) = r.lock() else { return };
@@ -139,6 +154,8 @@ pub struct SnapMeta {
     pub stage: String,
     /// skip 原因（`Some` = 本快照不派发决策：Begin / 解析失败）
     pub skip: Option<String>,
+    /// 剧本总回合数（拉面 = 77）——末回合判定用（`None` = 未知，不出图触发）
+    pub max_turn: Option<u32>,
 }
 
 impl SnapMeta {
@@ -149,12 +166,19 @@ impl SnapMeta {
             turn: Some(turn),
             stage: stage.into(),
             skip: None,
+            max_turn: None,
         }
     }
 
     /// 追加 skip 判定（Begin 快照由 main 用 [`classify_begin_reason`] 填 reason）
     pub fn with_skip(mut self, skip: Option<String>) -> Self {
         self.skip = skip;
+        self
+    }
+
+    /// 追加剧本总回合数（`game.max_turn()`，拉面 = 77；末回合自动出图判定用）
+    pub fn with_max_turn(mut self, max_turn: u32) -> Self {
+        self.max_turn = Some(max_turn);
         self
     }
 
@@ -165,6 +189,7 @@ impl SnapMeta {
             turn: None,
             stage: String::new(),
             skip: Some(reason.into()),
+            max_turn: None,
         }
     }
 }
@@ -209,6 +234,12 @@ struct GameCtx {
     decision_rows: u64,
     /// 本局最后一条 luck 行的 `total_luck_score`
     total_luck_end: Option<f64>,
+    /// 是否已收到过末回合（`turn == max_turn`）的快照
+    end_turn_seen: bool,
+    /// 刚收到的这第 2 份末回合快照需在 `on_turn_done()`（决策行落盘后）触发收尾
+    end_pending: bool,
+    /// meta.json / luck_trend.svg 已在末回合生成（切局/退出收尾不再重复）
+    end_done: bool,
 }
 
 impl OnlineRecorder {
@@ -298,6 +329,21 @@ impl OnlineRecorder {
             snap.emitted = true;
         }
         self.snap = Some(snap);
+
+        // 7) 末回合收尾触发：同一末回合（`turn >= max_turn`）出现第 2 份快照
+        //    （实测 game6222：`turn77` 是 Begin skip、`turn77_2` 才是含决策的 calc）→
+        //    本快照的决策行落盘后（`on_turn_done`）即生成 meta + SVG，不必等切局/退出。
+        if let Some(max_turn) = meta.max_turn
+            && let Some(t) = raw_turn
+            && t >= max_turn
+            && let Some(ctx) = self.game.as_mut()
+        {
+            if ctx.end_turn_seen {
+                ctx.end_pending = true;
+            } else {
+                ctx.end_turn_seen = true;
+            }
+        }
     }
 
     /// 决策 emit：见 [`on_emit`] 的模块文档
@@ -317,12 +363,11 @@ impl OnlineRecorder {
         }
     }
 
-    /// 收尾当前局：补 no_emit 行 + 写 `meta.json` + 关文件 + **自动出 SVG**
+    /// 收尾当前局：补 no_emit 行 + （若末回合未出图）写 `meta.json` + 出 SVG + 关文件
     ///
-    /// 出图触发点 = 「该局数据已完整」的时刻（收到末回合数据之后发生的一切收尾：
-    /// 切局 `switch` / 进程退出 `process_exit`）。不能在收到第一份末回合快照时
-    /// 立即出图——末回合常有第 2 份 `_2` 快照（决策行在 `_2` 里），立即出图会漏行；
-    /// 数据完整性只能等到下一条事件边界才能确认。
+    /// **末回合（77_2）已生成 meta/SVG 的局**（`end_done`）在此只关文件，不重复写；
+    /// 其余情况（中途停止 / 未触发末回合的局）在此补写 `meta.json`（`reason` 为
+    /// `switch` / `process_exit`）+ 自动出图——即切局/退出降级为「兜底」。
     fn finalize(&mut self, reason: &str) {
         let pending = self.snap.take();
         if let Some(s) = pending
@@ -333,6 +378,32 @@ impl OnlineRecorder {
         }
         let Some(ctx) = self.game.take() else {
             self.last_turn = None;
+            return;
+        };
+        if !ctx.end_done {
+            self.game = Some(ctx);
+            self.write_meta_and_plot(reason);
+        }
+        self.game = None;
+        self.last_turn = None;
+    }
+
+    /// 末回合第 2 份快照的决策行落盘后由 main 调用：触发收尾（meta + SVG）
+    fn handle_turn_done(&mut self) {
+        let pending = self.game.as_ref().map(|c| c.end_pending).unwrap_or(false);
+        if !pending {
+            return;
+        }
+        self.write_meta_and_plot("game_end");
+        if let Some(ctx) = self.game.as_mut() {
+            ctx.end_done = true;
+            ctx.end_pending = false;
+        }
+    }
+
+    /// 写 `meta.json`（`end_reason` 指定）+ 生成 `luck_trend.svg` 并展示可跳转路径
+    fn write_meta_and_plot(&mut self, reason: &str) {
+        let Some(ctx) = self.game.as_mut() else {
             return;
         };
         let meta = serde_json::json!({
@@ -348,16 +419,19 @@ impl OnlineRecorder {
             "decision_rows": ctx.decision_rows,
             "total_luck_end": ctx.total_luck_end,
         });
+        let meta_path = ctx.dir.join("meta.json");
         match serde_json::to_string_pretty(&meta) {
             Ok(s) => {
-                if let Err(e) = fs::write(ctx.dir.join("meta.json"), s) {
-                    warn!("写局元信息失败 {}: {e:?}", ctx.dir.join("meta.json").display());
+                if let Err(e) = fs::write(&meta_path, s) {
+                    warn!("写局元信息失败 {}: {e:?}", meta_path.display());
                 }
             }
             Err(e) => warn!("局元信息序列化失败: {e:?}"),
         }
-        // 局数据完整 → 自动生成 luck_trend.svg（best-effort：无有效行 / 渲染失败仅告警）
-        match crate::plot::luck_trend::render_game(&ctx.dir, ctx.game.unwrap_or(0)) {
+        let game = ctx.game.unwrap_or(0);
+        let dir = ctx.dir.clone();
+        // 自动生成 luck_trend.svg（best-effort：无有效行 / 渲染失败仅告警）
+        match crate::plot::luck_trend::render_game(&dir, game) {
             Ok(path) => {
                 // 展示绝对路径（Windows 上用 dunce 去掉 \\?\ 前缀）方便终端点击跳转；
                 // 走 stderr：--json 模式下 stdout 必须保持严格 JSON 流
@@ -366,7 +440,6 @@ impl OnlineRecorder {
             }
             Err(e) => warn!("该局自动出图失败: {e:?}"),
         }
-        self.last_turn = None;
     }
 
     /// 新开一局：建目录 + 建 `decisions.csv`（写列头）
@@ -402,6 +475,9 @@ impl OnlineRecorder {
             csv_rows: 0,
             decision_rows: 0,
             total_luck_end: None,
+            end_turn_seen: false,
+            end_pending: false,
+            end_done: false,
         });
     }
 
@@ -931,6 +1007,80 @@ mod tests {
         let sink = RecordingSink::new(EmptySink);
         sink.emit(&DecisionInfo::default(), &GameView::default());
         println!("RecordingSink 透传完成（未 init 全局时记录 no-op、内层不 panic）");
+    }
+
+    /// 末回合第 2 份快照（如拉面 turn77_2，含决策行那份）处理完 → `on_turn_done`
+    /// 立即写 meta（`end_reason=game_end`）+ 出图；随后切局不再重复写 meta
+    #[test]
+    fn test_recorder_end_turn_triggers_plot() {
+        let dir = std::env::temp_dir().join(format!("umaai_record_end_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let mut rec = OnlineRecorder::new(dir.clone());
+        let raw = |t: &str| {
+            format!(
+                r#"{{"baseGame":{{"scenarioId":14,"turn":{t},"source":"command","playing_state":1,"umaId":100201}},"ramen":{{}}}}"#
+            )
+        };
+        let view = |t: u32| GameView { turn: t, max_turn: 78, ..Default::default() };
+
+        // turn76：正常快照 + 决策（非末回合，不触发）
+        rec.handle_snapshot(&SnapMeta::normal(7075, 76, "Train").with_max_turn(77), &raw("76"));
+        rec.handle_emit(&decision_info("train"), &view(77));
+        assert!(!dir.join("game7075").join("luck_trend.svg").exists());
+
+        // turn77 第 1 份（Begin skip，如超级拉面丢包）：仅标记"已见末回合"，不出图
+        rec.handle_snapshot(
+            &SnapMeta::normal(7075, 77, "Begin")
+                .with_skip(Some("super_ramen_drop(active_effect empty)".into()))
+                .with_max_turn(77),
+            &raw("77"),
+        );
+        rec.handle_turn_done();
+        assert!(!dir.join("game7075").join("luck_trend.svg").exists());
+
+        // turn77_2（calc，决策行所在）：end_pending → 决策行落盘后 on_turn_done 出图
+        rec.handle_snapshot(&SnapMeta::normal(7075, 77, "Train").with_max_turn(77), &raw("77"));
+        rec.handle_emit(&decision_info("train"), &view(78));
+        let d = dir.join("game7075");
+        assert!(d.join("game7075_turn77_2.json").exists(), "末回合第 2 份应为 _2 命名");
+        rec.handle_turn_done();
+        assert!(d.join("luck_trend.svg").exists(), "77_2 处理完应立即出图");
+
+        let m: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(d.join("meta.json")).unwrap()).unwrap();
+        println!("末回合出图后的 meta: {m}");
+        assert_eq!(m["end_reason"], "game_end");
+        assert_eq!(m["decision_rows"], 2);
+
+        // 切局到 7076：end_done → finalize 不再重写 meta（仍为 game_end）
+        rec.handle_snapshot(&SnapMeta::normal(7076, 0, "Train"), &raw("0"));
+        let m2: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(d.join("meta.json")).unwrap()).unwrap();
+        assert_eq!(m2["end_reason"], "game_end", "切局不应覆盖末回合已写的 end_reason");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// 中途停止（未触发末回合）→ 切局 / 退出兜底写 meta（switch）+ 出图
+    #[test]
+    fn test_recorder_end_turn_fallback_on_switch() {
+        let dir = std::env::temp_dir().join(format!("umaai_record_endfb_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let mut rec = OnlineRecorder::new(dir.clone());
+        let raw = r#"{"baseGame":{"scenarioId":14,"turn":12,"source":"command","playing_state":1},"ramen":{}}"#;
+        rec.handle_snapshot(&SnapMeta::normal(7075, 12, "Train").with_max_turn(77), raw);
+        rec.handle_emit(&decision_info("train"), &GameView { turn: 13, max_turn: 78, ..Default::default() });
+
+        // 没到 77 就切局（用户中途停止）
+        rec.handle_snapshot(&SnapMeta::normal(7076, 0, "Train"), raw);
+        let d = dir.join("game7075");
+        let m: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(d.join("meta.json")).unwrap()).unwrap();
+        println!("兜底 meta: {m}");
+        assert_eq!(m["end_reason"], "switch");
+        assert!(d.join("luck_trend.svg").exists(), "兜底也应出图");
+
+        let _ = fs::remove_dir_all(&dir);
     }
 
     /// 构造一个最小带 luck extra 的决策（供端到端测试）

@@ -265,11 +265,19 @@ async fn main_guard() -> Result<()> {
                             .unwrap_or(serde_json::Value::Null);
                         record::classify_begin_reason(&v).to_string()
                     });
-                    record::on_snapshot(&record::SnapMeta::normal(chara_id, turn, stage).with_skip(skip), &contents);
+                    record::on_snapshot(
+                        &record::SnapMeta::normal(chara_id, turn, stage)
+                            .with_skip(skip)
+                            .with_max_turn(game.max_turn() as u32),
+                        &contents,
+                    );
                     ramen::process_ramen(
                         game, single_mode_chara_id, &ramen_trainer, &reason_slot, &sink, &mut luck_tracker, &mut rng,
                         json_mode, &emit_info,
                     )?;
+                    // 末回合第 2 份快照（如 turn77_2）的决策行已全部落盘 →
+                    // 立即写 meta + 生成 luck_trend.svg（切局/退出仅作兜底）
+                    record::on_turn_done();
                 }
                 Err(e) => {
                     // 解析失败：原文仍留档（归当前局 / game_unknown），CSV 记 skip(parse_error)

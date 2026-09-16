@@ -601,8 +601,9 @@
   6. **入口接线**（CLI 待排期）：
      - `umaai --plot [--game <id>]`：扫 `logs/game*/decisions.csv` 出图，**不重放**（待排期）
      - `luck_replay --svg`：重放后直接出 SVG（离线复盘，待排期）
-     - **局末自动出图已内置**（2026-09-16 用户再拍板，见「已定决策」4）：游戏数据完整收尾时生成该局 SVG
-- **触发点说明（2026-09-16 用户指正后固化）**：实际游戏在**收到末回合 77 数据**（`baseGame.turn == 77 == RamenGame::max_turn()`，实测 game6222 佐证）时结束。但**不能在收到第一份 77 快照时立即出图**——末回合实测有第 2 份 `_2` 快照（`turn77` 为 Begin skip、`turn77_2` 才含带决策的 calc 行），立即出图会漏掉 `_2` 的决策行；数据完整性只能等到**下一条事件边界**（切局 / 进程退出）才能确认，故自动出图挂在记录器 `finalize()`，产物 `logs/game{id}/luck_trend.svg`。
+     - **局末自动出图已内置**（2026-09-16 用户再拍板，见「已定决策」4）：末回合第 2 份快照处理完即生成该局 SVG（切局/退出仅兜底）
+- **触发点说明（2026-09-16 用户两次指正后固化）**：实际游戏在**收到末回合 77 数据**（`baseGame.turn == 77 == RamenGame::max_turn()`，实测 game6222 佐证）时结束。末回合实测有 **2 份快照**：`turn77` 是 Begin skip（超级拉面丢包）、`turn77_2` 才含带决策的 calc 行——**不能在第一份 77 快照时出图**；
+  2026-09-16 再修订：**改为在收到末回合第 2 份快照（`turn77_2`）、其决策行落盘后立即出图 + 写 meta（`end_reason=game_end`）**，不再等切局/退出。实现：`SnapMeta.max_turn`（main 传 `game.max_turn()`）+ 记录器对「同一末回合出现第 2 份快照」置 `end_pending`，`main.rs` 在 `process_ramen` 返回后调 `record::on_turn_done()` 触发（`handle_turn_done` → `write_meta_and_plot("game_end")`、标记 `end_done`）；切局 / 退出降级为**兜底**（`end_done` 局不再重写 meta/SVG；未触发末回合的中途停止局由 `finalize(switch/process_exit)` 补写）。产物 `logs/game{id}/luck_trend.svg`。
   7. **与 python 脚本的关系**：`scripts/plot_luck_trend.py` 保留作对照 / 备用（schema 相同 → 同一 CSV 可交叉验证两者结构与数值标注一致）；其 `--csv` 可直接吃 `logs/game{id}/decisions.csv`
 - **范围**：**本期只做拉面**（`scenarioId=14`）——运气分图表与 `single_mode_chara_id` 切局键均为拉面专属；温泉无该字段（现有代码退化用 `uma_id`），纳入需另定切局键，留待后续
 - **实现步骤**：
@@ -615,7 +616,7 @@
   1. **在线记录默认开**（`luck_record` 可显式关闭），产物落 `logs/game{id}/` 每局一目录
   2. 记录格式 **CSV**（与重放明细同 schema，复用现有解析）；**接收到的游戏数据保留 thisTurn.json 原文**，与其它产物平铺在同一局目录内（不另设子目录）
   3. 出图**直接生成 SVG**，不引入栅格化依赖、不产出 PNG/JPG
-  4. **"打完一局自动出图"改为做（2026-09-16 用户再拍板）**：游戏数据完整收尾（收到末回合 77 数据之后的切局 / 退出）时自动在 `logs/game{id}/luck_trend.svg` 出图——不在第一份末回合快照触发（末回合常有第 2 份 `_2` 快照，决策行在其内），详见「触发点说明」
+  4. **"打完一局自动出图"改为做，触发点=末回合第 2 份快照（2026-09-16 用户两次拍板）**：收到 `turn77_2`（含决策行那份）、其决策行落盘后立即写 `meta.json`（`end_reason=game_end`）+ 生成 `logs/game{id}/luck_trend.svg`；不在第一份末回合快照触发（它是 Begin skip、无决策行）；切局 / 退出降级为兜底，详见「触发点说明」
   5. 快照文件名保留 `game{id}_` 前缀；**在线 `step`/`chain_len` 留空**（不引入每快照行缓冲）
   6. 本期范围只覆盖拉面
 - **备注**：

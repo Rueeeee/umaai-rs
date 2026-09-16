@@ -223,5 +223,5 @@ umaai 实时监听游戏数据时，把「接收到的游戏数据」与「策�
 - **全局形态**：`OnceLock<Mutex<Option<OnlineRecorder>>>`，`record::init` 前所有入口 no-op——离线工具复用同一份 lib 代码不会误写日志
 - **切局 / 收尾**：`chara_id` 变化即收尾上一局（`end_reason=switch`）；`main.rs` 在 watch 循环结束（含 Err 路径）调 `record::finalize_shutdown()`
 - **无每快照缓冲**：行即时落盘；本快照无决策时 `no_emit` 行在其下一条快照到达（或收尾）时补出
-- **局末自动出图**：收尾时（= 收到末回合 77 数据之后的切局 / 退出）由 `plot::luck_trend::render_game` 生成 `luck_trend.svg`——末回合常有两份快照（决策在 `_2`），故不在第一份 77 数据时触发；生成后在终端以绿色打印**绝对路径**（`dunce` 去 `\\?\`，走 stderr，`--json` 模式 stdout 不受影响）
+- **局末自动出图**：**触发点 = 末回合第 2 份快照（拉面 `turn77_2`，含决策行那份）处理完后**（`main.rs` 在 `process_ramen` 返回后调 `record::on_turn_done()`）立即写 `meta.json`（`end_reason=game_end`）+ 由 `plot::luck_trend::render_game` 生成 `luck_trend.svg`；第一份末回合快照是 Begin skip 无决策行故不在此触发；切局 / 退出降级为兜底（`end_done` 局不再重写，中途停止的局在此补写）；生成后在终端以绿色打印**绝对路径**（`dunce` 去 `\\?\`，走 stderr，`--json` 模式 stdout 不受影响）
 - **本期范围**：仅拉面（`scenarioId=14`）；温泉无 `single_mode_chara_id` 切局键，未纳入
