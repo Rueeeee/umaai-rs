@@ -1771,6 +1771,19 @@ impl RecommendedRamenTrainer {
         self
     }
 
+    /// 第 3 年地区选择"单点偏好"强度（实验扫参，见
+    /// [`RamenPolicyConfig::region_y3_single_focus`]）。
+    ///
+    /// 三年统一写入该字段，但字段只在 `year_idx == 2`（第 3 年）被消费，
+    /// 第 1/2 年行为不受影响——配对实验中其余年份两臂逐位等价，Δ 纯归因第 3 年。
+    /// `0` = 现状（默认），`1..=3` = 组合内至少含 1..=3 个单点地区。
+    pub fn with_region_y3_single_focus(mut self, focus: u8) -> Self {
+        for year in self.years.iter_mut() {
+            year.policy.config.region_y3_single_focus = focus;
+        }
+        self
+    }
+
     /// EXP-006c：从 token 串构造 preset 变体（逐 token 覆盖三年同配置）。
     ///
     /// - `wisfN`：智力训练体力豁免下限 = N（见 [`RamenPolicyConfig::wisdom_vital_floor`]）
@@ -2145,6 +2158,69 @@ mod tests {
         c.check(matches!(trainer.last_year.lock().as_deref(), Ok(Some(0))), "普通实例记录本次决策年份");
         c.check(matches!(rollout.last_year.lock().as_deref(), Ok(None)), "rollout 跳过决策年份记录");
         c.check(rollout.last_breakdown().is_none(), "rollout 不采集原因日志");
+        c.finish()
+    }
+
+    /// `with_region_y3_single_focus` 把强度写入三年（字段只在第 3 年被消费），
+    /// 且经完整 `select_action` 路径后第 3 年选中组合确实全为单点地区、
+    /// 与默认档（focus=0）选区不同。
+    #[test]
+    #[allow(clippy::panic)]
+    fn recommended_region_y3_single_focus_end_to_end() -> Result<()> {
+        use crate::{
+            gamedata::{init_global, ramen::RAMENDATA},
+            utils::{Checks, get_workspace_root, init_test_logger}
+        };
+        use crate::game::{
+            InheritInfo,
+            ramen::{Operation, RamenAction, RamenGame, rules::get_region_combinations}
+        };
+        use rand::{SeedableRng, prelude::StdRng};
+
+        let workspace_root = get_workspace_root()?;
+        std::env::set_current_dir(workspace_root)?;
+        let _ = init_test_logger("error");
+        let _ = init_global();
+
+        let data = RAMENDATA.get().expect("init_global 后 RAMENDATA 已装载");
+        let is_single = |rid: usize| data.ramen_region_effect[rid].at_trains.len() == 1;
+
+        let deck = [302424, 302894, 303044, 302924, 303024, 303054];
+        let inherit = InheritInfo { blue_count: [15, 3, 0, 0, 0], extra_count: [0, 30, 0, 0, 30, 30] };
+        let actions: Vec<RamenAction> = get_region_combinations(2)?
+            .iter()
+            .map(|&c| RamenAction::no_ramen(Operation::RegionSelect(c)))
+            .collect();
+
+        let mut game = RamenGame::newgame(102601, &deck, inherit)?;
+        game.base.turn = 47; // 第 3 年地区选择
+        let mut rng = StdRng::seed_from_u64(42);
+
+        let trainer = RecommendedRamenTrainer::new();
+        let idx0 = trainer.select_action(&game, &actions, &mut rng)?;
+        let f3 = RecommendedRamenTrainer::new().with_region_y3_single_focus(3);
+        let idx3 = f3.select_action(&game, &actions, &mut rng)?;
+        println!("Y3 选区: focus=0 → {:?} / focus=3 → {:?}", actions[idx0].operation, actions[idx3].operation);
+
+        let combo3 = match actions[idx3].operation {
+            Operation::RegionSelect(c) => c,
+            _ => return Err(anyhow::anyhow!("focus=3 选中不是 RegionSelect"))
+        };
+        let combo0 = match actions[idx0].operation {
+            Operation::RegionSelect(c) => c,
+            _ => return Err(anyhow::anyhow!("focus=0 选中不是 RegionSelect"))
+        };
+        let mut c = Checks::new();
+        c.check(
+            combo3.iter().all(|&rid| is_single(rid)),
+            "focus=3 经完整 select_action 选中组合全为单点地区"
+        );
+        c.check(combo0 != combo3, "focus=3 与 focus=0 选区不同");
+        c.check(
+            trainer.years.iter().all(|y| y.policy.config.region_y3_single_focus == 0)
+                && f3.years.iter().all(|y| y.policy.config.region_y3_single_focus == 3),
+            "with_region_y3_single_focus 三年统一写入"
+        );
         c.finish()
     }
 

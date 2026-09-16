@@ -179,16 +179,15 @@ pub fn calc_ramen_training(
                 let chosen = actions[idx].clone();
                 let view = g.view();
                 // `last_decision()` 仅对真正走过 MCTS 搜索的阶段返回 `Some`；其它（门控
-                // 关闭的 `region`、合并 RamenSelect 路径、单候选等）返回 `None`。
+                // 关闭的 `region`、单候选等）返回 `None`。
                 // 仅以下场景需合成一条输出（手写 fallback）——否则该决策没有结果可 emit：
                 // 1) 地区选择（门控关闭，手写策略）——最初"无结果"的问题；
                 // 2) **比赛回合**：`is_race_turn()` 下落 `Train`，list_actions 只有"比赛"
                 //    一个固定动作，trainer 因单候选直接落 fallback、不搜索，`last_decision()`
                 //    为 `None`，不合成的话 calc_ramen_training 返回空、屏幕上无策略输出。
-                // 3) **RamenSelect 决策**：合并搜索路径清掉 last_summary（`last_decision()`
-                //    为 `None`），吃面 / 不吃面都没有可 emit 的结果——不吃面还会触发链式
-                //    决策（→ 计算下一步 → Train），决策#1 必须作为单独决策输出（JSON 流为
-                //    不吃面 → compute_next_step → 训练）；吃面虽不链式，但同样需要决策行。
+                // 3) **RamenSelect 决策（兜底）**：合并搜索路径 2026-09 起按面聚合后暴露
+                //    `last_decision()`；仅当回落三阶段逻辑（合并候选 ≤ 1 / 单候选短路）
+                //    仍为 `None` 时才在此合成（吃面不链式时同样需要决策行）。
                 //    其余 None 阶段保持旧行为（决策仍返回但**不**合成、不 emit）。
                 let mut info = match trainer.last_decision() {
                     Some(info) => Some(info),

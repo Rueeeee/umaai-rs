@@ -36,6 +36,20 @@
 > 结论：拉面剧本的「人头」问题已全部清零；剩余未解决项集中在已搁置的温泉剧本与 base 潜伏项，以及拉面侧的死代码 / 测试语义 / 跨剧本防御缺口。详见下文各条目。
 
 
+## 第3年地区选择「多训练地区 vs 单点训练地区」配对扫描（维持现状）
+
+- **日期**：2026-09-16
+- **状态**：已解决（结论 = 维持现有第 3 年策略，不采纳单点偏好）
+- **问题描述**：现有 `score_region`（`bias_sum × youqing × 1.5 + 弱位覆盖 − waste×10`）在第 3 年自然偏向"覆盖 build 多卡位的 3 点地区"（id 15-19，youqing 40×3 槽）；用户要求与"倾向单点训练地区"（id 10-14，youqing 50/60 集中单槽）做整局配对比较——沿用 9/15 轴线：打分公式不动、扫参（`region_y3_single_focus`：0=现状 / 1..=3=组合内至少含 N 个单点地区，仅第 3 年生效，组合级候选过滤）。
+- **排查过程**（全 101 构成配对，两种子复现）：
+  1. seed=42×100 局/构成四档扫描：focus=0 选区单点占比 26%（42 构成全 3 点 / 38 含 1 单点 / 21 含 2 单点——现有公式本身已按 build 自适应选单/多点）；focus=1/2/3 单点占比 40%/67%/100%，Y2 选区 0/101 变化（隔离成立）
+  2. focus=1 显著负（Δ−128，t=−3.36）、focus=2 显著负（Δ−368，t=−4.62）；focus=3 整体中性（Δ+66，t=+0.64）但结构性分化：**玩家真实 build（≥4 种卡，21/101）大亏 −1145（t=−5.22）**，智向（智≥2）+370、残缺（<4 种）+384
+  3. seed=61444×50 复测 f0 vs f3：整体 +52（t=+0.51）、真实 build −1099（t=−5.04）、智向 +345、残缺 +354——模式逐点位复现
+  4. 机制：真实 build 训练分布跨多槽，3 点覆盖（40×训练到的槽）胜于单点集中（60 仅落在单槽）；智向 build 训练高度集中，东京智单点（60）反超；混合档（focus=1/2）强制"单点多点混搭"是最差集合
+- **解决方案**：不采纳单点偏好，维持现有第 3 年策略。`region_y3_single_focus` 保留为可配实验字段（默认 0 = 现状），bench_compositions 新增 `--region-y3-single-focus` 与 region_y2/y3 选区 CSV 列（此前 comp 档不记录每年实际选区），配套 3 个单测（focus 语义 / 仅第 3 年生效 / 回退）
+- **备注**：与 8/25 教训同构——"残缺 build 拉高结论、真实 build 受损"的指标不可采纳；现有公式的自适应（智向选单点、真实选多点）已隐含最优混合，强制单点属过度旋转。数据留档 logs/comp-y3sf0..3.csv（seed42×100）、logs/comp-y3sf-{0,3}-seed61444.csv（×50）。
+
+
 ## 自动 vs 玩家手动：吃面-训练覆盖差距（玩家 87% vs 自动 52%）
 
 - **日期**：2026-08-26
@@ -547,3 +561,48 @@
   - `test_region_build_sensitivity` 已由临时验证转为断言测试（`assert_ne!` 两 build 选中组合不同）
   - 与既有 issue「第三年地区选择组合过多」（已解决：Fixed）相关联：Fixed 是性能临时方案，本 issue 是在 build 维度上的功能补齐。恢复 `all` 后实测整局耗时 2.9ms 不变，120 组合枚举无可测代价
   - **影响采样器复现基座**：`sampler.rs` 的 `run_region_select` 读 `GAMECONFIG.ramen_region_strategy`，本次由 `fixed` 改 `all` 后同一条 `SampleSpec` 的轨迹已不同（结构性指标不变：74/78 回合覆盖、卡组分层 min==max）。Phase 3 落盘的配置签名须用改后这套
+
+## 运气分 SVG 趋势图 + 在线决策记录整合（规划）
+
+- **日期**：2026-09-16
+- **状态**：待实现（**方案已定稿，暂不实施**，2026-09-16 用户拍板）
+- **问题描述**：
+  1. 运气分可视化目前依赖 Python + matplotlib（`scripts/plot_luck_trend.py` 出每局 JPG），Windows（用户主力运行环境）不便：打包 exe 体积 50-100MB、启动慢，且 matplotlib 打包需额外处理字体；
+  2. **在线运行（AIRedirector / 玩家模式）没有决策记录落盘**——运气分只存在于内存 `LuckScoreTracker`，仅经 sink 上屏 / 走 stdout JSON，事后无法复盘；想要曲线只能靠"快照样本 + `luck_replay` 重放"，而重放既需要完整快照序列、又要重跑一遍 MCTS（seed 不同结果还会微变）。
+- **目标**：
+  1. umaai 侧用 Rust 直接生成 **SVG** 趋势图（零 Python 依赖；中文交给渲染器字体回退，规避字体打包/加载问题）；
+  2. **在线决策记录**：umaai 运行时把每个决策点结果落盘，格式与重放 CSV 严格对齐 → 图可直接由在线记录生成，无需重放；
+  3. 离线（重放）与在线（记录）**共用同一份数据 schema 与同一套绘图模块**。
+- **方案设计**：
+  1. **统一数据 schema**：直接沿用 `luck_replay` 现有明细列（`game/file/turn/seq/source/playing_state/stage/outcome/reason/step/chain_len/decision_kind/n_actions/cand{1..5}_desc|cand{1..5}_score|cand{1..5}_n/chosen_idx/chosen_desc/chosen_action_luck/t_n_raw/t_n_display/total_luck/turn_delta`），并把它从 bin 私有逻辑抽到 lib（供在线记录与重放共用）
+  2. **在线记录器**（`decision/` 下新增，如 `record.rs`）：
+     - 挂载点：`emit_with_luck_decision`（每条决策 emit 之后）——与 luck 挂载同一处，链式中间项也记录（`step`/`chain_len` 区分）
+     - 输出：`logs/luck_online/luck_<single_mode_chara_id>.csv`（logs 目录下按局分文件，切局即换文件；列头与 schema 一致）
+     - 开关：**默认开**，`game_config.toml` 顶层 `luck_record` 可关（一局约 200 行 × ~0.5KB ≈ 100KB，代价可忽略）；`--json` 等既有模式不受影响（写文件、不污染 stdout）
+     - 断局/切局：按 `single_mode_chara_id` 变化新建文件；AI 中途启动时该局记录不完整（可接受，图上标注起始回合）
+  3. **SVG 绘图模块**（`crates/umaai/src/plot/`）：
+     - `svg.rs`：极简 SVG 构建器（线/折线/矩形/多边形/文本/坐标变换，字符串拼接，无第三方依赖）
+     - `luck_trend.rs`：单局一张图，3 子图（期望评分 / 运气分 / 运气波动），与现有 python 版对齐——折线带圆点标记、运气波动为正绿负红柱状、每子图 x 轴标回合刻度、skip 快照剔除、竖直底色带按 AI 决策类别（训练/出行/休息/比赛/吃面/地区选择）
+     - 中文：`font-family="Microsoft YaHei, PingFang SC, Noto Sans CJK SC, sans-serif"` 走渲染器回退，**不内嵌字形**
+     - 输出：`logs/luck_trend_<chara_id>.svg`（自包含单文件，浏览器 / 看图器直接打开）——**直接出 SVG，不做 PNG/JPG 栅格化**（不引入 `resvg` 等依赖）
+  4. **入口接线**：
+     - `luck_replay --svg`：重放后直接出 SVG（离线复盘）
+     - `umaai --plot [--chara <id>]`：只读在线记录出图，不重放（在线复盘）
+     - 可选增强：切局（`emit_info("new_game")`）时自动生成上一局 SVG
+  5. **与 python 脚本的关系**：`scripts/plot_luck_trend.py` 保留作对照 / 备用（schema 相同 → 同一 CSV 可交叉验证两者结构与数值标注一致）；若后续确认 SVG 完全够用，可再评估是否下线 python 版
+- **实现步骤**（待排期，本次不实施）：
+  1. 抽共享行 schema（lib 化 `luck_replay` 的行构造）+ 在线记录器 + `luck_record` 开关
+  2. SVG 构建器 + `luck_trend` 绘图（逐项对齐 python 样式）
+  3. CLI 接线（`luck_replay --svg` / `umaai --plot`）
+  4. 交叉验证：同一 CSV 分别出 SVG 与 JPG，比对曲线/底色/刻度/图例
+  5. 文档（`project_context.md` 工具章节）与 changelog
+- **已定决策（2026-09-16 用户拍板）**：
+  1. **在线记录默认开**（`luck_record` 可显式关闭），落盘 **`logs/` 目录**（按局分文件）
+  2. 记录格式 **CSV**（与重放明细同 schema，复用现有解析）
+  3. 出图**直接生成 SVG**，不引入栅格化依赖、不产出 PNG/JPG（浏览器 / 看图器打开 SVG 即可）
+  4. "打完一局自动出图"**本次不做**，保留为后续可选增强（如需，可挂在切局 `emit_info("new_game")` 处）
+- **实施排期**：本次仅定稿规划，**暂不实施**；开工时按上述「实现步骤」1→5 推进
+- **备注**：
+  - 选 SVG 而非 plotters 的理由：无字体加载/打包问题、体积小（数百 KB）、可在浏览器交互（悬停/缩放）、实现量小
+  - 样式基准：`scripts/plot_luck_trend.py`（经用户多轮微调）；数据来源：`crates/umaai/src/bin/luck_replay.rs`
+  - 相关：本文件「年度 RMJ 派生状态恢复」修复后，运气分曲线才具备分析价值（修复前第 2/3 年存在 ~2300 系统性虚降）

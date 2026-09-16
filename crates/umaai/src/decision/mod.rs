@@ -30,7 +30,7 @@ pub struct LastReasonSink {
 }
 
 impl LastReasonSink {
-    pub(crate) fn new() -> Arc<Self> {
+    pub fn new() -> Arc<Self> {
         Arc::new(Self { inner: Mutex::new(None) })
     }
 
