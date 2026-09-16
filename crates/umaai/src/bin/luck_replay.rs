@@ -36,7 +36,6 @@
 use std::{
     collections::HashMap,
     fs,
-    io::Write,
     path::{Path, PathBuf},
     process::ExitCode,
     sync::{Arc, Mutex},
@@ -57,13 +56,14 @@ use umasim::{
 };
 
 use umaai::{
-    decision::{LastReasonSink, LuckScoreTracker},
+    decision::{
+        LastReasonSink,
+        LuckScoreTracker,
+        record::{build_row, classify_begin_reason, detail_header, num_col, raw_from_display, CsvSink, SnapRef}
+    },
     protocol::{ParsedGame, parse_game_by_scenario},
     scenario::ramen::process_ramen
 };
-
-/// 候选列数（`reason_max_display` 截断后最多 5 个）
-const MAX_CAND_COLS: usize = 5;
 
 /// CLI 参数（lexopt，与项目主 bin 惯例一致）
 #[derive(Debug)]
@@ -206,79 +206,9 @@ impl DecisionSink for CaptureSink {
     }
 }
 
-/// 极简 CSV 转义：字段含 `,` `"` 换行时用引号包裹并翻倍引号
-fn csv_escape(s: &str) -> String {
-    if s.contains(['"', ',', '\n', '\r']) {
-        format!("\"{}\"", s.replace('"', "\"\""))
-    } else {
-        s.to_string()
-    }
-}
-
-/// CSV 文件写入器（逐行写，无外部依赖）
-struct CsvSink {
-    w: Box<dyn Write>
-}
-
-impl CsvSink {
-    fn new(path: &Path) -> Result<Self> {
-        let w = Box::new(fs::File::create(path)?);
-        Ok(Self { w })
-    }
-
-    /// 写一行：各列转义后逗号连接
-    fn row(&mut self, cols: &[String]) -> Result<()> {
-        let line = cols.iter().map(|c| csv_escape(c)).collect::<Vec<_>>().join(",");
-        writeln!(self.w, "{line}")?;
-        Ok(())
-    }
-}
-
-/// 诊断明细 CSV 的列头（顺序即列序）
-fn detail_header() -> Vec<String> {
-    let mut cols = vec![
-        "game".into(),
-        "file".into(),
-        "turn".into(),
-        "seq".into(),
-        "source".into(),
-        "playing_state".into(),
-        "stage".into(),
-        "outcome".into(),
-        "reason".into(),
-        "step".into(),
-        "chain_len".into(),
-        "decision_kind".into(),
-        "n_actions".into()
-    ];
-    for i in 1..=MAX_CAND_COLS {
-        cols.push(format!("cand{i}_desc"));
-    }
-    for i in 1..=MAX_CAND_COLS {
-        cols.push(format!("cand{i}_score"));
-    }
-    for i in 1..=MAX_CAND_COLS {
-        cols.push(format!("cand{i}_n"));
-    }
-    cols.extend([
-        "chosen_idx".into(),
-        "chosen_desc".into(),
-        "chosen_action_luck".into(),
-        "t_n_raw".into(),
-        "t_n_display".into(),
-        "total_luck".into(),
-        "turn_delta".into()
-    ]);
-    cols
-}
-
-/// 数值 → CSV 列（`None`/NaN/Inf → 空串；f64 保留两位小数）
-fn num_col(v: Option<f64>) -> String {
-    match v {
-        Some(x) if x.is_finite() => format!("{x:.2}"),
-        _ => String::new()
-    }
-}
+// 极简 CSV 转义 / CSV 写入器 / 明细列头 / raw 反推 / Begin 分类 / 行构造
+// 已统一抽到 `umaai::decision::record`（与在线记录共用同一份 schema）——
+// 本文件直接复用，保证在线 / 离线 CSV 逐行可比对。
 
 /// 按局聚合的运气分波动统计（写明细行的同时累积）
 #[derive(Default)]
@@ -350,50 +280,6 @@ impl DeltaStats {
             self.neg,
             self.pos
         )
-    }
-}
-
-/// 把显示分 baseline 反推为 raw T(n)：`raw = display − (max_turn − turn) × bonus`
-///
-/// 与 `LuckScoreTracker::to_display` 互为逆运算；`bonus` 为全局 `mcts_turn_bonus`。
-fn raw_from_display(display: f64, turn: i32, max_turn: i32, bonus: i32) -> f64 {
-    display - (max_turn - turn) as f64 * bonus as f64
-}
-
-/// 快照层 skip 原因标注（仅当 dispatch 后 stage == `Begin` 时调用）
-///
-/// 判定顺序与 `GameStatusRamen::into_game` 的 stage dispatch 完全一致——
-/// 只做标注，不参与任何计算决策。
-fn classify_begin_reason(v: &serde_json::Value) -> &'static str {
-    let bg = v.get("baseGame").unwrap_or(&serde_json::Value::Null);
-    let ramen = v.get("ramen").unwrap_or(&serde_json::Value::Null);
-    let turn = bg.get("turn").and_then(|x| x.as_u64()).unwrap_or(0);
-    let source = bg.get("source").and_then(|x| x.as_str()).unwrap_or("");
-    let ps = bg.get("playing_state").and_then(|x| x.as_u64()).unwrap_or(0);
-    let selected = ramen
-        .get("selected_regions")
-        .and_then(|x| x.as_array())
-        .map(|a| a.iter().all(|r| r.as_u64().unwrap_or(0) == 0))
-        .unwrap_or(false);
-    let active_effect_empty = ramen
-        .get("active_effect_array")
-        .map(|a| a.as_array().map(|a| a.is_empty()).unwrap_or(true))
-        .unwrap_or(true);
-
-    if (2..=71).contains(&turn) && selected {
-        "data_incomplete(selected_regions=0)"
-    } else if source == "event" {
-        "event"
-    } else if ps == 5 {
-        "playing_state=5(event)"
-    } else if ps == 46 {
-        "rmj_settle(46)"
-    } else if ps == 48 {
-        "rmj_final(48)"
-    } else if turn >= 72 && active_effect_empty {
-        "super_ramen_drop(active_effect empty)"
-    } else {
-        "begin_unclassified"
     }
 }
 
@@ -509,7 +395,7 @@ fn run() -> Result<()> {
         let contents = match fs::read_to_string(&snap.path) {
             Ok(c) => c,
             Err(e) => {
-                write_diag_row(&mut detail, snap, "skip", &format!("read_error: {e}"), "", 0, "", None, None, 0, 0)?;
+                detail.row(&build_row(&snap_ref(snap, "", 0, ""), "skip", &format!("read_error: {e}"), None, None, 0, 0))?;
                 stats.entry(snap.game).or_default().skip.entry("skip_other").and_modify(|c| *c += 1).or_insert(1);
                 continue;
             }
@@ -517,7 +403,7 @@ fn run() -> Result<()> {
         let json: serde_json::Value = match serde_json::from_str(&contents) {
             Ok(v) => v,
             Err(e) => {
-                write_diag_row(&mut detail, snap, "skip", &format!("parse_error(json): {e}"), "", 0, "", None, None, 0, 0)?;
+                detail.row(&build_row(&snap_ref(snap, "", 0, ""), "skip", &format!("parse_error(json): {e}"), None, None, 0, 0))?;
                 stats.entry(snap.game).or_default().skip.entry("skip_parse_error").and_modify(|c| *c += 1).or_insert(1);
                 continue;
             }
@@ -531,21 +417,21 @@ fn run() -> Result<()> {
         let parsed = match parse_game_by_scenario(&contents) {
             Ok(p) => p,
             Err(e) => {
-                write_diag_row(&mut detail, snap, "skip", &format!("parse_error: {e}"), &source, ps, "", None, None, 0, 0)?;
+                detail.row(&build_row(&snap_ref(snap, &source, ps, ""), "skip", &format!("parse_error: {e}"), None, None, 0, 0))?;
                 stats.entry(snap.game).or_default().skip.entry("skip_parse_error").and_modify(|c| *c += 1).or_insert(1);
                 continue;
             }
         };
         let (stage_str, skip) = match &parsed {
             ParsedGame::Onsen(_) => {
-                write_diag_row(&mut detail, snap, "skip", "onsen_scenario", &source, ps, "", None, None, 0, 0)?;
+                detail.row(&build_row(&snap_ref(snap, &source, ps, ""), "skip", "onsen_scenario", None, None, 0, 0))?;
                 stats.entry(snap.game).or_default().skip.entry("skip_onsen").and_modify(|c| *c += 1).or_insert(1);
                 continue;
             }
             ParsedGame::Ramen { game, .. } => (format!("{:?}", game.stage), classify_begin_reason(&json))
         };
         if stage_str == "Begin" {
-            write_diag_row(&mut detail, snap, "skip", skip, &source, ps, &stage_str, None, None, 0, 0)?;
+            detail.row(&build_row(&snap_ref(snap, &source, ps, &stage_str), "skip", skip, None, None, 0, 0))?;
             stats.entry(snap.game).or_default().skip.entry(skip).and_modify(|c| *c += 1).or_insert(1);
             continue;
         }
@@ -567,16 +453,16 @@ fn run() -> Result<()> {
         match res {
             Ok(()) if emits.is_empty() => {
                 st.no_emit_snaps += 1;
-                write_diag_row(&mut detail, snap, "no_emit", "no_decision", &source, ps, &stage_str, None, None, 0, 0)?;
+                detail.row(&build_row(&snap_ref(snap, &source, ps, &stage_str), "no_emit", "no_decision", None, None, 0, 0))?;
             }
             Ok(()) => {
                 st.calc_snaps += 1;
                 st.emit_rows += emits.len() as u64;
                 for (i, (info, view)) in emits.iter().enumerate() {
-                    write_diag_row(
-                        &mut detail, snap, "calc", "", &source, ps, &stage_str, Some((info, view)), Some((max_turn, bonus)),
+                    detail.row(&build_row(
+                        &snap_ref(snap, &source, ps, &stage_str), "calc", "", Some((info, view)), Some((max_turn, bonus)),
                         emits.len(), i,
-                    )?;
+                    ))?;
                     // luck 更新行：scenario_extra 带 luck snapshot 的行（链式末项）
                     if let Some(extra) = &info.scenario_extra {
                         let display = extra.get("current_terminal_baseline").and_then(|x| x.as_f64());
@@ -599,9 +485,9 @@ fn run() -> Result<()> {
                 }
             }
             Err(e) => {
-                write_diag_row(
-                    &mut detail, snap, "skip", &format!("process_error: {e:?}"), &source, ps, &stage_str, None, None, 0, 0,
-                )?;
+                detail.row(&build_row(
+                    &snap_ref(snap, &source, ps, &stage_str), "skip", &format!("process_error: {e:?}"), None, None, 0, 0,
+                ))?;
                 stats.entry(snap.game).or_default().skip.entry("skip_process_error").and_modify(|c| *c += 1).or_insert(1);
             }
         }
@@ -619,100 +505,17 @@ fn run() -> Result<()> {
     Ok(())
 }
 
-/// 写一份诊断明细行
-///
-/// `emit` 为 `Some((info, view))` 且 `max_bonus = Some((max_turn, bonus))` 时是计算决策行
-/// （链式末项带 luck 挂载）；`chain_len` / `step` 仅决策行有意义，skip 行为空。
-#[allow(clippy::too_many_arguments)]
-fn write_diag_row(
-    detail: &mut CsvSink,
-    snap: &SnapshotRef,
-    outcome: &str,
-    reason: &str,
-    source: &str,
-    playing_state: u64,
-    stage: &str,
-    emit: Option<(&DecisionInfo, &GameView)>,
-    max_bonus: Option<(i32, i32)>,
-    chain_len: usize,
-    step: usize
-) -> Result<()> {
-    let mut cols: Vec<String> = vec![
-        snap.game.to_string(),
-        snap.path.file_name().unwrap_or_default().to_string_lossy().to_string(),
-        snap.turn.to_string(),
-        snap.seq.to_string(),
-        source.to_string(),
-        playing_state.to_string(),
-        stage.to_string(),
-        outcome.to_string(),
-        reason.to_string()
-    ];
-
-    let mut cand_desc: Vec<String> = Vec::new();
-    let mut cand_score: Vec<String> = Vec::new();
-    let mut cand_n: Vec<String> = Vec::new();
-    let mut decision_kind = String::new();
-    let mut n_actions = String::new();
-    let mut chosen_idx = String::new();
-    let mut chosen_desc = String::new();
-    let mut chosen_luck = String::new();
-    let mut t_raw = String::new();
-    let mut t_display = String::new();
-    let mut total = String::new();
-    let mut delta = String::new();
-
-    if let Some((info, view)) = emit {
-        decision_kind = info.decision_kind.clone();
-        n_actions = info.candidate_descriptions.len().to_string();
-        cand_desc = info.candidate_descriptions.iter().take(MAX_CAND_COLS).cloned().collect();
-        cand_score = info.candidate_scores.iter().take(MAX_CAND_COLS).map(|s| format!("{s:.2}")).collect();
-        cand_n = info.candidate_n.iter().take(MAX_CAND_COLS).map(|n| n.to_string()).collect();
-        chosen_idx = info.action_index.to_string();
-        chosen_desc = info.candidate_descriptions.get(info.action_index).cloned().unwrap_or_default();
-        if let Some(extra) = &info.scenario_extra {
-            if let Some(luck) = extra
-                .get("action_luck")
-                .and_then(|a| a.get(info.action_index.to_string()))
-                .and_then(|v| v.as_f64())
-            {
-                chosen_luck = format!("{luck:.2}");
-            }
-            let display = extra.get("current_terminal_baseline").and_then(|x| x.as_f64());
-            t_display = num_col(display);
-            if let (Some(disp), Some((max_turn, bonus))) = (display, max_bonus) {
-                t_raw = format!("{:.2}", raw_from_display(disp, view.turn as i32, max_turn, bonus));
-            }
-            total = num_col(extra.get("total_luck_score").and_then(|x| x.as_f64()));
-            delta = num_col(extra.get("last_turn_delta").and_then(|x| x.as_f64()));
-        }
+/// 把离线快照定位（文件名解析所得）转成共享 [`SnapRef`]（在线/离线共用行构造）
+fn snap_ref(snap: &SnapshotRef, source: &str, playing_state: u64, stage: &str) -> SnapRef {
+    SnapRef {
+        game: snap.game,
+        file: snap.path.file_name().unwrap_or_default().to_string_lossy().into_owned(),
+        turn: snap.turn,
+        seq: snap.seq,
+        source: source.to_string(),
+        playing_state,
+        stage: stage.to_string()
     }
-
-    cols.extend([
-        if chain_len > 0 { (step + 1).to_string() } else { String::new() },
-        if chain_len > 0 { chain_len.to_string() } else { String::new() },
-        decision_kind,
-        n_actions
-    ]);
-    for i in 0..MAX_CAND_COLS {
-        cols.push(cand_desc.get(i).cloned().unwrap_or_default());
-    }
-    for i in 0..MAX_CAND_COLS {
-        cols.push(cand_score.get(i).cloned().unwrap_or_default());
-    }
-    for i in 0..MAX_CAND_COLS {
-        cols.push(cand_n.get(i).cloned().unwrap_or_default());
-    }
-    cols.extend([
-        chosen_idx,
-        chosen_desc,
-        chosen_luck,
-        t_raw,
-        t_display,
-        total,
-        delta
-    ]);
-    detail.row(&cols)
 }
 
 /// 生成一局的 summary 行（列序与 `summary_header` 一致）
@@ -784,60 +587,5 @@ mod tests {
         assert_eq!(parse_file_name("thisTurn.json"), None);
         assert_eq!(parse_file_name("archive.zip"), None);
         assert_eq!(parse_file_name("game7075.json"), None);
-    }
-
-    /// CSV 转义：逗号 / 引号 / 换行 / 中文
-    #[test]
-    fn test_csv_escape() {
-        assert_eq!(csv_escape("plain"), "plain");
-        assert_eq!(csv_escape("a,b"), "\"a,b\"");
-        assert_eq!(csv_escape("a\"b"), "\"a\"\"b\"");
-        assert_eq!(csv_escape("吃面 X(替换A1+B2)"), "吃面 X(替换A1+B2)");
-    }
-
-    /// raw 反推与 display 正算互为逆运算
-    #[test]
-    fn test_raw_from_display_roundtrip() {
-        let (raw, turn, max_turn, bonus) = (50150.0_f64, 5_i32, 77_i32, 2_i32);
-        let display = raw + (max_turn - turn) as f64 * bonus as f64;
-        assert_eq!(raw_from_display(display, turn, max_turn, bonus), raw);
-    }
-
-    /// classify_begin_reason：与协议 dispatch 的「不派发」分支逐一对应
-    #[test]
-    fn test_classify_begin_reason() {
-        let mk = |source: &str, ps: u64, turn: u64, regions: &[u64], active_effect: usize| {
-            serde_json::json!({
-                "baseGame": {
-                    "turn": turn,
-                    "source": source,
-                    "playing_state": ps,
-                    "scenarioId": 14
-                },
-                "ramen": {
-                    "selected_regions": regions,
-                    "active_effect_array": vec![0u8; active_effect]
-                }
-            })
-        };
-        // event 回合
-        assert_eq!(classify_begin_reason(&mk("event", 1, 13, &[3, 7, 12], 0)), "event");
-        // 数据获取不全（turn 2..=71 且 selected_regions 全 0）优先于 source event
-        assert_eq!(
-            classify_begin_reason(&mk("event", 1, 13, &[0, 0, 0], 0)),
-            "data_incomplete(selected_regions=0)"
-        );
-        // playing_state=46 RMJ 结算
-        assert_eq!(classify_begin_reason(&mk("command", 46, 13, &[3, 7, 12], 0)), "rmj_settle(46)");
-        // 超级拉面丢包（turn>=72 且 active_effect 空）
-        assert_eq!(
-            classify_begin_reason(&mk("command", 1, 72, &[3, 7, 12], 0)),
-            "super_ramen_drop(active_effect empty)"
-        );
-        // 超级拉面已生效（active_effect 非空）→ 协议会派发 Train，不会停在 Begin
-        assert_eq!(
-            classify_begin_reason(&mk("command", 1, 72, &[3, 7, 12], 2)),
-            "begin_unclassified"
-        );
     }
 }

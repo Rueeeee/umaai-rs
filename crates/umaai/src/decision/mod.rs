@@ -7,6 +7,9 @@
 pub mod luck_score;
 pub use luck_score::LuckScoreTracker;
 
+pub mod record;
+pub use record::RecordingSink;
+
 use std::sync::{Arc, Mutex};
 
 use umasim::{

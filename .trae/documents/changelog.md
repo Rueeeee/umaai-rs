@@ -9,6 +9,11 @@
 - **开局空数组解析修复**：`selected_regions` 协议读取改 `Vec`，空数组按「未选地区」落 game 默认 `[0,0,0]`（原定长数组使 turn0/1 快照整份丢弃）
 - **只吃面回合运气分修复**：合并搜索路径按面聚合回三阶段下标后暴露 `DecisionInfo`（原清空摘要致吃面决策无评分、该回合不计运气分）
 - **年度 RMJ 派生状态恢复**：协议重建按「每年成功、第 3 年大成功」补齐 `rmj_results` / `train_level_bonus`，并按「当年是否已吃面」归零新年窗口遗留 `scenario_pt`（缺失致第 2/3 年期望系统性虚降 ~2300 并拖低决策质量）
+- **在线决策记录器（每局一目录）**：umaai 实时运行按 `single_mode_chara_id` 落 `logs/game{id}/`——`thisTurn.json` 原文 + `decisions.csv`（逐决策点，与重放明细同 schema，`step`/`chain_len` 留空）+ `meta.json`；`RecordingSink` 包装输出 sink 捕获全部决策 emit（含链式中间项），`OnceLock` 全局形态未 init 即全程 no-op，切局/退出自动收尾
+- **luck_record 开关**：`[config_override]` 可选覆盖（默认开），`default_config.toml` 显式写出；离线 sim / bench / 重放工具不读、不写日志
+- **决策明细 schema lib 化**：`luck_replay` 的列头 / 行构造 / Begin 分类 / raw 反推抽到 `umaai::decision::record`，与在线记录共用同源；CSV 写入改走现有 `csv` crate 结构化 `Writer`（引号 / 换行语义与手拼版本一致，离线输出逐字节不变）
+- **比赛回合手写 fallback 上屏修复**：`HumanReadableSink` 对空分 fallback 决策（地区选择 / 比赛回合单候选 / RamenSelect 单候选）统一打印「选择…（手写逻辑）」，此前仅 region_select 上屏、比赛回合在终端静默（JSON 模式全量字段照常）
+- **局末自动出 SVG（运气分趋势图）**：新增 `plot/` 模块（极简 SVG 构建器 + `luck_trend` 3 子图，零新增绘图依赖）；游戏数据完整收尾（收到末回合 77 数据之后的切局 / 退出）时自动在 `logs/game{id}/luck_trend.svg` 出图并在终端以绿色显示可跳转绝对路径（`--json` 走 stderr 不污染 JSON 流）；子图带边框与横坐标轴（轴标题「回合数」、**x 轴右端多覆盖 1 格至末回合 +1 即 78 回合**）、**每个子图带纵坐标刻度数字（1/2/5 步长自动取整）与竖排纵轴标题**、图例改为「蒙特卡洛估分 / 显示估分」并隐藏原始运气分、图例下侧（快照数下一行）署名「由 UmaAI-Ramen 生成」
 
 ## 2026-09-15
 - **地区弱位覆盖按智卡数查表（方案Ⅰ 固化）**：`region_weak_cover_weight` 改三态（0=按智卡数查表 智≤1→12/智≥2→0、<0=关闭、>0=固定值实验），与弱位训练偏好查表配套；全 101 种构成配对验证智≥2 零变化、智≤1 加权 +220

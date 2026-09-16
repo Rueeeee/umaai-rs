@@ -98,9 +98,10 @@ pub fn process_ramen(
             .cloned();
 
         // 手写 fallback 决策（`candidate_scores` 为空，如默认配置下 region
-        // 未开时的地区选择）：没有真正的搜索评分，走 luck 挂载只会以 baseline=0
-        // 污染 luck tracker（后续回合运气全被算错），且 sink 打印的「期望评分」
-        // 只是回合加成换算、运气恒 0 会误导。故直接 emit（不触 luck）；
+        // 未开时的地区选择、**比赛回合单候选**、RamenSelect 单候选短路）：
+        // 没有真正的搜索评分，走 luck 挂载只会以 baseline=0 污染 luck tracker
+        // （后续回合运气全被算错），且 sink 打印的「期望评分」只是回合加成换算、
+        // 运气恒 0 会误导。故直接 emit（不触 luck）；
         // HumanReadableSink 会为该决策打印「选择...（手写逻辑）」。搜索决策
         // （常见 train/ramen_select）仍走完整 luck 挂载。
         if last_info.candidate_scores.is_empty() {

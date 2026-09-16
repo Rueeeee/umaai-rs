@@ -564,45 +564,64 @@
 
 ## 运气分 SVG 趋势图 + 在线决策记录整合（规划）
 
-- **日期**：2026-09-16
-- **状态**：待实现（**方案已定稿，暂不实施**，2026-09-16 用户拍板）
+- **日期**：2026-09-16（同日二次修订：落盘改为"每局一目录"；在线记录器与局末自动 SVG 已实施）
+- **状态**：**部分实施**——在线记录器（步骤 1~2）与局末自动 SVG 出图（步骤 3 接线）已落地；`umaai --plot` / `luck_replay --svg` CLI 接线（步骤 4）与三方交叉验证（步骤 5）待排期
 - **问题描述**：
   1. 运气分可视化目前依赖 Python + matplotlib（`scripts/plot_luck_trend.py` 出每局 JPG），Windows（用户主力运行环境）不便：打包 exe 体积 50-100MB、启动慢，且 matplotlib 打包需额外处理字体；
   2. **在线运行（AIRedirector / 玩家模式）没有决策记录落盘**——运气分只存在于内存 `LuckScoreTracker`，仅经 sink 上屏 / 走 stdout JSON，事后无法复盘；想要曲线只能靠"快照样本 + `luck_replay` 重放"，而重放既需要完整快照序列、又要重跑一遍 MCTS（seed 不同结果还会微变）。
 - **目标**：
   1. umaai 侧用 Rust 直接生成 **SVG** 趋势图（零 Python 依赖；中文交给渲染器字体回退，规避字体打包/加载问题）；
-  2. **在线决策记录**：umaai 运行时把每个决策点结果落盘，格式与重放 CSV 严格对齐 → 图可直接由在线记录生成，无需重放；
+  2. **在线记录**：umaai 运行时按局把「接收到的游戏数据」（`thisTurn.json` 原文）与「策略计算结果」（逐决策点）一并落盘 → 图可直接由在线记录生成，无需重放；
   3. 离线（重放）与在线（记录）**共用同一份数据 schema 与同一套绘图模块**。
 - **方案设计**：
-  1. **统一数据 schema**：直接沿用 `luck_replay` 现有明细列（`game/file/turn/seq/source/playing_state/stage/outcome/reason/step/chain_len/decision_kind/n_actions/cand{1..5}_desc|cand{1..5}_score|cand{1..5}_n/chosen_idx/chosen_desc/chosen_action_luck/t_n_raw/t_n_display/total_luck/turn_delta`），并把它从 bin 私有逻辑抽到 lib（供在线记录与重放共用）
-  2. **在线记录器**（`decision/` 下新增，如 `record.rs`）：
-     - 挂载点：`emit_with_luck_decision`（每条决策 emit 之后）——与 luck 挂载同一处，链式中间项也记录（`step`/`chain_len` 区分）
-     - 输出：`logs/luck_online/luck_<single_mode_chara_id>.csv`（logs 目录下按局分文件，切局即换文件；列头与 schema 一致）
-     - 开关：**默认开**，`game_config.toml` 顶层 `luck_record` 可关（一局约 200 行 × ~0.5KB ≈ 100KB，代价可忽略）；`--json` 等既有模式不受影响（写文件、不污染 stdout）
-     - 断局/切局：按 `single_mode_chara_id` 变化新建文件；AI 中途启动时该局记录不完整（可接受，图上标注起始回合）
-  3. **SVG 绘图模块**（`crates/umaai/src/plot/`）：
+  1. **落盘形态：每局一个目录** `logs/game{id}/`（`id` = `single_mode_chara_id`，现有切局键，与插件归档 `game{id}_turn{turn}.json` 同源），该局**全部产物平铺在同一目录内**（csv / json / svg，后续新增产物同样落此目录）：
+
+     | 文件 | 内容 | 写入时机 |
+     |---|---|---|
+     | `game{id}_turn{turn}[_{seq}].json` | 接收到的游戏数据**原文**（`thisTurn.json`） | watch 每收到一份即写（写完即关） |
+     | `decisions.csv` | 策略计算结果：逐决策点一行（候选 / 评分 / 局数 / 选中 / 运气分） | 每条决策 emit 即时写（无缓冲） |
+     | `meta.json` | 局元信息：起止时间 / 起始回合 / `mid_entry` / 结束原因 / `snapshots` / `csv_rows` / `decision_rows` / `total_luck_end` | 切局或进程退出时收尾 |
+
+  2. **统一数据 schema**：沿用 `luck_replay` 现有明细列（`game/file/turn/seq/source/playing_state/stage/outcome/reason/step/chain_len/decision_kind/n_actions/cand{1..5}_desc|cand{1..5}_score|cand{1..5}_n/chosen_idx/chosen_desc/chosen_action_luck/t_n_raw/t_n_display/total_luck/turn_delta`，共 35 列），与 `classify_begin_reason` 一并从 bin 私有逻辑抽到 lib（`umaai::decision::record`），供在线记录与离线重放共用。**在线 `step` / `chain_len` 两列留空**（用户拍板：不为它们保留"每快照行缓冲"——在线边算边 emit，末行落盘时才知道本快照总行数；两列只有离线重放有，图上不用）。
+  3. **在线记录器**（`crates/umaai/src/decision/record.rs`）：状态只有两项——「当前局（`chara_id` + 目录 + `decisions.csv` 句柄）」与「回合内序号（生成 `_{seq}` 后缀）」；
+     - 全局形态 `OnceLock<Mutex<Option<OnlineRecorder>>>`（对齐 `GAMECONFIG` / `SAVED_GAME` 的项目惯例）：`record::init` **之前所有入口 no-op**，`luck_replay` / `luck_probe` / bench 与在线共用同一份 `process_ramen` 代码也不会误写日志
+     - 接收侧：watch 收到 `contents` → parse 得 `chara_id` / `turn` → 写 `game{id}_turn{turn}[_{seq}].json` 原文（Begin / 事件 / RMJ / 解析失败等"不派发"快照同样留档；解析失败归入当前局，落在 `_unparsed_{n}.json`）
+     - 决策侧：`DecisionSink` **外包一层 `RecordingSink`**——转发内层（stdout JSON / 屏幕），同时把 `DecisionInfo` 记为一行 CSV；链式决策的**中间项**（直发 `sink.emit`、不挂 luck）同样捕获、不漏行
+     - 切局：`chara_id` 变化 → 收尾上一局（`meta.json` + 关文件）→ 建新目录；`main.rs` 在 watch 循环结束（含 `Err` 路径）调 `finalize_shutdown()`
+     - 无决策快照的 `no_emit` 行：在**下一条快照到达 / 收尾时**补出（此时才能确定"本快照没有决策"），保证与离线口径一致
+     - 开关：**默认开**，`game_config.toml` 的 `[config_override]` 段 `luck_record` 可关（放该段避开"顶层字段必须写在所有 `[xxx]` 段之前"的 TOML 陷阱）；`--json` 等既有模式不受影响（写文件、不污染 stdout）
+  4. **快照文件名保留 `game{id}_` 前缀**（用户拍板）：与插件归档同名同构 → `luck_replay --dir logs/game{id}` **零改动**即可重放该局（`turn{NN}.json` 形式过不了 `luck_replay::parse_file_name` 的 `game` 前缀 + `_turn` 分隔要求）；同回合序号与插件同口径（首份无后缀、第 2 份 `_2`、第 3 份 `_3`…），`seq` 列随之可比对；目录内 `meta.json` / `thisTurn.json` 非该格式，扫描时自然跳过
+  5. **SVG 绘图模块**（`crates/umaai/src/plot/`，已实现 `svg.rs` 构建器 + `luck_trend.rs` 渲染）：
      - `svg.rs`：极简 SVG 构建器（线/折线/矩形/多边形/文本/坐标变换，字符串拼接，无第三方依赖）
      - `luck_trend.rs`：单局一张图，3 子图（期望评分 / 运气分 / 运气波动），与现有 python 版对齐——折线带圆点标记、运气波动为正绿负红柱状、每子图 x 轴标回合刻度、skip 快照剔除、竖直底色带按 AI 决策类别（训练/出行/休息/比赛/吃面/地区选择）
      - 中文：`font-family="Microsoft YaHei, PingFang SC, Noto Sans CJK SC, sans-serif"` 走渲染器回退，**不内嵌字形**
-     - 输出：`logs/luck_trend_<chara_id>.svg`（自包含单文件，浏览器 / 看图器直接打开）——**直接出 SVG，不做 PNG/JPG 栅格化**（不引入 `resvg` 等依赖）
-  4. **入口接线**：
-     - `luck_replay --svg`：重放后直接出 SVG（离线复盘）
-     - `umaai --plot [--chara <id>]`：只读在线记录出图，不重放（在线复盘）
-     - 可选增强：切局（`emit_info("new_game")`）时自动生成上一局 SVG
-  5. **与 python 脚本的关系**：`scripts/plot_luck_trend.py` 保留作对照 / 备用（schema 相同 → 同一 CSV 可交叉验证两者结构与数值标注一致）；若后续确认 SVG 完全够用，可再评估是否下线 python 版
-- **实现步骤**（待排期，本次不实施）：
-  1. 抽共享行 schema（lib 化 `luck_replay` 的行构造）+ 在线记录器 + `luck_record` 开关
-  2. SVG 构建器 + `luck_trend` 绘图（逐项对齐 python 样式）
-  3. CLI 接线（`luck_replay --svg` / `umaai --plot`）
-  4. 交叉验证：同一 CSV 分别出 SVG 与 JPG，比对曲线/底色/刻度/图例
-  5. 文档（`project_context.md` 工具章节）与 changelog
+     - 输出：`logs/game{id}/luck_trend.svg`（自包含单文件）——**直接出 SVG，不做 PNG/JPG 栅格化**（不引入 `resvg` 等依赖）
+     - **样式（2026-09-16 用户逐条调整后定稿）**：3 子图各带边框与横坐标轴（四边框 `fill=none`；轴标题「回合数」、刻度标签为回合数，**x 轴右端多留 1 格覆盖到末回合 +1（拉面即 78 回合）**）；**每个子图带纵坐标刻度数字（1/2/5×10^n 步长自动取整，约 5 档）与竖排纵轴标题（估分 / 运气分 / 回合波动）**；图例为「蒙特卡洛估分（raw 实线）/ 显示估分（显示口径虚线）/ 显示运气分」+ 类别色块 + 波动正负，**原始运气分（raw 累计）曲线与图例项均隐藏**（代码注释保留，可一键恢复，颜色 `#e8a3a6`）；图例下侧（快照数下一行）署名 `由 UmaAI-Ramen 生成`
+     - **路径展示**：出图后在线记录器在终端打印绿色绝对路径（Windows 经 `dunce::canonicalize` 去掉 `\\?\` 前缀）方便点击跳转；走 **stderr**，`--json` 模式 stdout 仍严格 JSON
+  6. **入口接线**（CLI 待排期）：
+     - `umaai --plot [--game <id>]`：扫 `logs/game*/decisions.csv` 出图，**不重放**（待排期）
+     - `luck_replay --svg`：重放后直接出 SVG（离线复盘，待排期）
+     - **局末自动出图已内置**（2026-09-16 用户再拍板，见「已定决策」4）：游戏数据完整收尾时生成该局 SVG
+- **触发点说明（2026-09-16 用户指正后固化）**：实际游戏在**收到末回合 77 数据**（`baseGame.turn == 77 == RamenGame::max_turn()`，实测 game6222 佐证）时结束。但**不能在收到第一份 77 快照时立即出图**——末回合实测有第 2 份 `_2` 快照（`turn77` 为 Begin skip、`turn77_2` 才含带决策的 calc 行），立即出图会漏掉 `_2` 的决策行；数据完整性只能等到**下一条事件边界**（切局 / 进程退出）才能确认，故自动出图挂在记录器 `finalize()`，产物 `logs/game{id}/luck_trend.svg`。
+  7. **与 python 脚本的关系**：`scripts/plot_luck_trend.py` 保留作对照 / 备用（schema 相同 → 同一 CSV 可交叉验证两者结构与数值标注一致）；其 `--csv` 可直接吃 `logs/game{id}/decisions.csv`
+- **范围**：**本期只做拉面**（`scenarioId=14`）——运气分图表与 `single_mode_chara_id` 切局键均为拉面专属；温泉无该字段（现有代码退化用 `uma_id`），纳入需另定切局键，留待后续
+- **实现步骤**：
+  1. ✅ 抽共享行 schema + `classify_begin_reason` 到 lib（`umaai::decision::record`）+ `OnlineRecorder` + `RecordingSink` + `luck_record` 开关
+  2. ✅ `main.rs` 接线（`init` / `on_snapshot` / sink 包装 / 退出收尾）+ 单测（行构造、端到端切局与 `meta.json`、解析失败留档）
+  3. ✅ SVG 构建器 + `luck_trend` 绘图（逐项对齐 python 样式；已接局末自动触发，实测 game6222 出图 79KB / 合法 XML）+ 单测（分类口径、真实 schema 渲染冒烟）
+  4. ⏳ CLI 接线（`umaai --plot` / `luck_replay --svg`）
+  5. ⏳ 交叉验证：同一局「在线 `decisions.csv`」对「插件快照离线重放 CSV」（忽略 `step`/`chain_len`）对「python JPG 出图」三方比对
 - **已定决策（2026-09-16 用户拍板）**：
-  1. **在线记录默认开**（`luck_record` 可显式关闭），落盘 **`logs/` 目录**（按局分文件）
-  2. 记录格式 **CSV**（与重放明细同 schema，复用现有解析）
-  3. 出图**直接生成 SVG**，不引入栅格化依赖、不产出 PNG/JPG（浏览器 / 看图器打开 SVG 即可）
-  4. "打完一局自动出图"**本次不做**，保留为后续可选增强（如需，可挂在切局 `emit_info("new_game")` 处）
-- **实施排期**：本次仅定稿规划，**暂不实施**；开工时按上述「实现步骤」1→5 推进
+  1. **在线记录默认开**（`luck_record` 可显式关闭），产物落 `logs/game{id}/` 每局一目录
+  2. 记录格式 **CSV**（与重放明细同 schema，复用现有解析）；**接收到的游戏数据保留 thisTurn.json 原文**，与其它产物平铺在同一局目录内（不另设子目录）
+  3. 出图**直接生成 SVG**，不引入栅格化依赖、不产出 PNG/JPG
+  4. **"打完一局自动出图"改为做（2026-09-16 用户再拍板）**：游戏数据完整收尾（收到末回合 77 数据之后的切局 / 退出）时自动在 `logs/game{id}/luck_trend.svg` 出图——不在第一份末回合快照触发（末回合常有第 2 份 `_2` 快照，决策行在其内），详见「触发点说明」
+  5. 快照文件名保留 `game{id}_` 前缀；**在线 `step`/`chain_len` 留空**（不引入每快照行缓冲）
+  6. 本期范围只覆盖拉面
 - **备注**：
+  - 已知冗余：`SendGameStatusPlugin` 本就把每份快照归档成 `game{id}_turn{turn}[_{seq}].json`（工作区 `logs/SendGameStatusPlugin/` 的 560 份即来自它，4 局 ≈ 3MB）。umaai 侧再存一份的增量价值 = 与策略结果同目录自包含、可跨机分析、解析失败样本也留档、出图/重放不必再手工拷插件目录；体积 ≈ 0.8~1MB/局（含 SVG）可忽略
+  - **离线输出不变**：`luck_replay` 的行构造改为调用 lib 后，同种子同参数下明细 CSV 与 summary CSV 与改动前**逐字节一致**（已验证）
   - 选 SVG 而非 plotters 的理由：无字体加载/打包问题、体积小（数百 KB）、可在浏览器交互（悬停/缩放）、实现量小
   - 样式基准：`scripts/plot_luck_trend.py`（经用户多轮微调）；数据来源：`crates/umaai/src/bin/luck_replay.rs`
+  - `logs/` 与 `*.svg` 已在 `.gitignore`，新目录不污染仓库
   - 相关：本文件「年度 RMJ 派生状态恢复」修复后，运气分曲线才具备分析价值（修复前第 2/3 年存在 ~2300 系统性虚降）

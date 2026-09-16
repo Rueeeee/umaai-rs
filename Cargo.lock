@@ -2646,6 +2646,7 @@ dependencies = [
  "colored",
  "comfy-table",
  "crossterm 0.28.1",
+ "csv",
  "dunce",
  "enum-iterator",
  "env_logger",

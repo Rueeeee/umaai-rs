@@ -73,6 +73,11 @@ ramen_region_fixed = [[11, 14, 15]]
 # ---------- output ----------
 log_level = "info"
 
+# ---------- 在线记录（仅 umaai 实时运行读取；离线 sim/bench 不使用） ----------
+# 每局一目录 logs/game{id}/：thisTurn.json 原文 + decisions.csv + meta.json
+# （开关在 game_config.toml 的 [config_override] 段可覆盖为 false）
+luck_record = true
+
 
 [mcts]
 # 每个动作搜索次数（默认 12288；计算太慢可选 8192/4096）
