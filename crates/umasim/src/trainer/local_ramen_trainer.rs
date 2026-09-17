@@ -1795,6 +1795,8 @@ impl RecommendedRamenTrainer {
     /// - `poN`：power 近上限衰减统一覆盖 = N/100（EXP-006e）；`p1o/p2o/p3oN` 分年
     /// - `pg[m]N`：power 短板追赶覆盖 = ±N/100（m 前缀=负号，'-' 是 token 分隔符不能用；EXP-006e）
     /// - `base`：无覆盖（对照）
+    /// - `supermodeN`：0默认二，1固定一，2固定三，3按终盘缺口和卡数选范围。
+    /// - `ptblendN`：近上限 PT 连续定价窗口 N/100 次训练，0 关闭（实验）。
     ///
     /// 未识别 token 直接报错，防止实验名拼错静默跑成 base。
     pub fn with_tokens(tokens: &str) -> Result<Self> {
@@ -1802,6 +1804,16 @@ impl RecommendedRamenTrainer {
         for token in tokens.split('-') {
             if token == "base" {
                 continue;
+            } else if let Some(v) = token.strip_prefix("supermode") {
+                let mode: u8 = v.parse()?;
+                anyhow::ensure!(mode <= 3, "supermode 需要0..3");
+                for year in trainer.years.iter_mut() { year.policy.config.super_choice_mode = mode; }
+            } else if let Some(v) = token.strip_prefix("ptblend") {
+                let turns: f32 = v.parse::<f32>()? / 100.0;
+                anyhow::ensure!(turns.is_finite() && (0.0..=10.0).contains(&turns), "ptblend 必须在 0..=1000");
+                for year in trainer.years.iter_mut() {
+                    year.policy.config.pt_cap_blend_turns = turns;
+                }
             } else if let Some(v) = token.strip_prefix("wisf") {
                 let floor: i32 = v.parse()?;
                 for year in trainer.years.iter_mut() {
@@ -3334,6 +3346,84 @@ mod tests {
         println!("未知 token trdxx 是否报错: {}", bad.is_err());
         assert!(bad.is_err(), "无法解析的 trd 值必须报错");
         Ok(())
+    }
+
+    /// 二轮组合：只按真实可增长属性计算预留惩罚，保留远离上限时的原结果。
+    #[test]
+    fn test_round2_clipped_reserve_boundaries() -> Result<()> {
+        use crate::{game::{InheritInfo, ramen::RamenGame}, gamedata::init_global,
+            utils::{Checks, get_workspace_root}};
+        std::env::set_current_dir(get_workspace_root()?)?;
+        init_global()?;
+        let mut game = RamenGame::newgame(102601,
+            &[302424,302894,303044,302924,303024,303054],
+            InheritInfo { blue_count:[15,3,0,0,0], extra_count:[0,30,0,0,30,30] })?;
+        game.base.turn=38;
+        let base=RecommendedRamenTrainer::with_tokens("ptblend200")?;
+        let candidate=RecommendedRamenTrainer::with_tokens("ptblend200-capd0-rgn1")?;
+        let mut c=Checks::new();
+        for y in 0..3 {
+            let mut expected=base.years[y].policy.config.clone();
+            expected.cap_discount_weight=0.0;
+            c.check(candidate.years[y].policy.config==expected,"policy 只取消副属性折扣");
+            c.check(candidate.years[y].config.reserve_gain_mode==1,"三年均按实际增量算预留");
+            c.check(candidate.years[y].config.status_reserve_max==base.years[y].config.status_reserve_max,
+                "保留预留阈值，不等于关闭预留机制");
+        }
+        let gain=[100,0,0,0,0,0];
+        // turn38 时 r=40*(76-38)/76=20；剩余10时，仅新增10有效。
+        for (space,want) in [(0,0.0),(10,45.0),(200,0.0)] {
+            game.uma.five_status[0]=game.uma.five_status_limit[0]-space;
+            let old=base.years[1].reserve_penalty(&game,&gain);
+            let new=candidate.years[1].reserve_penalty(&game,&gain);
+            println!("space={space}: old={old} clipped={new}");
+            c.check((new-want).abs()<0.001,"符合独立手算的实际增量惩罚");
+            if space==200 { c.check(old==new,"窗口外惩罚不变"); }
+            else { c.check(old>new,"溢出增量不再被重复惩罚"); }
+        }
+        c.finish()
+    }
+
+    /// 实验参数仅改变三年的连续窗口，默认关闭且拒绝越界/非有限值。
+    #[test]
+    fn test_pt_cap_blend_token_isolation() -> anyhow::Result<()> {
+        use crate::utils::Checks;
+        let base = RecommendedRamenTrainer::new();
+        let variant = RecommendedRamenTrainer::with_tokens("ptblend200")?;
+        let mut checks = Checks::new();
+        for year in 0..3 {
+            let mut expected = base.years[year].policy.config.clone();
+            checks.check(expected.pt_cap_blend_turns==0.0,"默认关闭实验");
+            expected.pt_cap_blend_turns=2.0;
+            checks.check(variant.years[year].policy.config==expected,"只覆盖窗口字段");
+        }
+        for bad in ["ptblendNaN","ptblendinf","ptblend1001","ptblendbad"] {
+            checks.check(RecommendedRamenTrainer::with_tokens(bad).is_err(),"非法实验值报错");
+        }
+        println!("ptblend200 三年隔离与非法参数检查完成");
+        checks.finish()
+    }
+
+    /// 超级拉面开关只覆盖对应字段，固定对照和自适应模式都应用于三年策略。
+    #[test]
+    fn test_super_choice_token_isolation() -> Result<()> {
+        use crate::utils::Checks;
+        let base = RecommendedRamenTrainer::new();
+        let mut checks = Checks::new();
+        for mode in 0..=3 {
+            let variant = RecommendedRamenTrainer::with_tokens(&format!("supermode{mode}"))?;
+            for year in 0..3 {
+                let mut expected = base.years[year].policy.config.clone();
+                checks.check(expected.super_choice_mode == 0, "默认固定选项二");
+                expected.super_choice_mode = mode;
+                checks.check(variant.years[year].policy.config == expected, "只覆盖超级拉面模式");
+            }
+        }
+        for bad in ["supermode4", "supermodeNaN", "supermode256", "supermode-1", "evreal3"] {
+            checks.check(RecommendedRamenTrainer::with_tokens(bad).is_err(), "非法或未保留开关报错");
+        }
+        println!("超级拉面模式的三年隔离与参数校验完成");
+        checks.finish()
     }
 }
 
