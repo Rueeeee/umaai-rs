@@ -626,3 +626,21 @@
   - 样式基准：`scripts/plot_luck_trend.py`（经用户多轮微调）；数据来源：`crates/umaai/src/bin/luck_replay.rs`
   - `logs/` 与 `*.svg` 已在 `.gitignore`，新目录不污染仓库
   - 相关：本文件「年度 RMJ 派生状态恢复」修复后，运气分曲线才具备分析价值（修复前第 2/3 年存在 ~2300 系统性虚降）
+
+## 合宿训练诀窍填充缺失（"高体力一选休息"根因）
+
+- **日期**：2026-09-17
+- **状态**：已解决
+- **问题描述**：game6222 回合 60（第三年夏合宿开局，体力 85/108）MCTS 把「休息」排第一（"高体力一选休息"）。初判指向手写策略体力硬门限（`vital_rest=40`）——被分叉实验否决：512 种子 CRN 配对「休息 vs 智训练」rollout，490/512 次分叉发生在双方体力 ≥50，仅 1 次 ≤40。
+- **排查过程**：
+  1. `luck_replay` 重放回合 60 与在线逐位同向（休息第一 63549 vs 智 63320），排除配置/数据漂移
+  2. CRN 配对 rollout 探针（512 种子 × 7 候选）：休息分支终局 score_pt 领先，优势集中在 PT 分量（+126）与五维净值（+22）；逐回合追踪发现两条分支在 t61 吃面时已分叉（休息分支吃面库存 [2,4,2]，智训分支 [1,3,1]）
+  3. 库存差异回溯到 t60 动作本身：合宿**休息**后库存 +1×3（[1,3,1]→[2,4,2]），合宿**智训练**后 +0×3（[1,3,1]→[1,3,1]）——违反合宿「任何动作三种诀窍都 +1」规则
+  4. 代码定位：协议合宿回合（36-39 / 60-63）`train_feeling_type` 全 [0,0,0,0,0] → `into_game` 映射 None（`protocol/ramen.rs` 显式注释「协议 0=本回合无角标」）；`action.rs::fill_feeling_gauge` 被 `if let Some(train_feelings)` 门控整段跳过——但合宿全 MAX 分支（`fill_gauge_xiahesu_max`）本就不需要角标；非训练动作走 `fill_gauge_non_train` 无条件填充 → **只有训练在合宿漏掉 3 诀窍/回合**
+  5. 影响面：全部存档（7075-7078 / 6222）两次合宿角标全 0 → 在线对局合宿训练系统性少 3 诀窍/回合 → MCTS 视野里合宿训练亏诀窍 → 休息胜出。附带发现：72-77 角标也全 0，且 NN 特征注释本就把角标限定「回合 2-71」→ URA 训练不填属预期语义
+- **解决方案**：
+  1. `fill_feeling_gauge` 门控放宽为 `is_xiahesu || train_feeling_type.is_some()`（合宿无条件走 `fill_gauge_after_train` 的 xiahesu 全 MAX；None 用默认角标占位，合宿分支不消费它）
+  2. `run_distribute` URA 回合（72-77）角标**照常抽签但不落库**（置 None）——保留抽签消耗使后续 distribute_all/hint 的固定流偏移逐位不变，sim 与在线行为一致
+  3. 新增守门单测 ×2：合宿 None 角标训练仍 +1×3（含休息对照 / URA None 不填对照）；72-77 角标不落库但分布照常分配
+- **验证**：落地后 `luck_replay` 回合 60 决策翻转——智训练 63887 > 休息 63525（+362），"高体力一选休息"消失（修复前休息 +229 领先）。模拟数值变化 → 基线作废（老规矩）；Y3 观测列 `gauge_gain_y3` 56→50、`gauge_overflow_y3` 4→0、`friend_turns_y3` 19→16（观测随填充执行走，与旧在线行为一致），score / 五维逐位不变
+- **备注**：存量红测试 4 个与本修复逐位无关——`test_combined_gate_off` / `test_combined_on_skips`（pt_favor_rate 2.0 快照基线过期，用户明示不管）、`test_ramen_three_stage_action_unchanged` / `test_yearly_observability_full_game_and_csv`（最近策略调优未重抓基线，干净 master 亦红；后者 score/五维断言对本次改动逐位不变，仅 Y3 观测列随语义变化）。重抓基线留待单独排期
