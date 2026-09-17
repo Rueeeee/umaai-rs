@@ -56,3 +56,4 @@ crossterm = "0.28.1"
 os_str_bytes = "7.1.1"
 dunce = "1.0.5"
 csv.workspace = true
+zip.workspace = true

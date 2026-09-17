@@ -10,6 +10,11 @@
 //! - `meta.json`：局元信息（起止时间 / 起始回合 / 中途接入标记 / 终局运气分等），
 //!   **末回合第 2 份快照（拉面 `turn77_2`，含决策行那份）处理完时写**（`end_reason=game_end`）；
 //!   中途停止 / 未触发末回合的局由切局 / 退出兜底补写（`switch` / `process_exit`）
+//! - `luck_trend.svg`：该局运气分趋势图（局末自动渲染；切局 / 退出兜底补渲）
+//!
+//! 末回合触发完 meta + SVG 后，**仅当 `end_reason=game_end` 时**自动把 `logs/game{id}/`
+//! 打成 `logs/game{id}.zip` 并清理原目录（由 [`crate::decision::zip_export::zip_and_cleanup`] 实现）。
+//! 切局 / 退出兜底不打包——中途停止的局保留 `logs/game{id}/` 方便人工排查 / 重打。
 //!
 //! 通过全局 [`RECORDER`]（`OnceLock<Mutex<Option<OnlineRecorder>>>`）访问：
 //! `init` **之前所有入口为 no-op**——离线工具（`luck_replay` / `luck_probe` / bench）与
@@ -36,7 +41,7 @@ use std::{
 
 use anyhow::{Result, bail};
 use colored::Colorize;
-use log::warn;
+use log::{info, warn};
 use umasim::{
     gamedata::GAMECONSTANTS,
     output::{DecisionInfo, DecisionSink, GameView},
@@ -70,7 +75,7 @@ pub fn init(enabled: bool, logs_dir: PathBuf) -> Result<()> {
 
 /// 收到一份游戏快照时的入口（main watch 循环 parse 后调用）
 ///
-/// 内部完成：上一快照 `no_emit` 补行 → 切局检测与新局目录 → 原文落盘 → 快照上下文
+/// 内部完成：上一快照 `no_emit` 补行 → 切局检测与新本局游戏记录目录 → 原文落盘 → 快照上下文
 /// 记录 → （Begin / 解析失败快照的 skip 行即时写出）。全程 best-effort，不返回错误。
 pub fn on_snapshot(meta: &SnapMeta, raw: &str) {
     let Some(r) = RECORDER.get() else { return };
@@ -273,7 +278,7 @@ impl OnlineRecorder {
         let raw_ps = bg_playing_state(&bg);
         let raw_uma = bg_uma_id(&bg);
 
-        // 3) 切局检测 / 新局目录（解析失败未给 game 时沿用当前局）
+        // 3) 切局检测 / 新本局游戏记录目录（解析失败未给 game 时沿用当前局）
         let game = meta.game.or_else(|| self.game.as_ref().and_then(|g| g.game));
         let cur_game = self.game.as_ref().and_then(|g| g.game);
         if self.game.is_none() || game != cur_game {
@@ -440,6 +445,19 @@ impl OnlineRecorder {
             }
             Err(e) => warn!("该局自动出图失败: {e:?}"),
         }
+        // 局末（game_end）自动打包：把 logs/game{id}/ 打成 logs/game{id}.zip 后清理原目录。
+        // 仅 game_end 触发：切局 / 退出兜底不打包——中途停止的局保留 logs/game{id}/ 方便人工排查 / 重打。
+        if reason == "game_end" {
+            match crate::decision::zip_export::zip_and_cleanup(&dir) {
+                Ok(zip_path) => {
+                    let shown = dunce::canonicalize(&zip_path).unwrap_or(zip_path);
+                    eprintln!("{}", format!("本局游戏记录已打包: {}", shown.display()).bright_green());
+                    // json 模式下走 info 流：用户拍板「json 模式使用 info 消息类型输出」
+                    info!("本局游戏记录已打包 zip: {}", shown.display());
+                }
+                Err(e) => warn!("本局游戏记录打包失败: {e:?}（原目录 {} 保留）", dir.display()),
+            }
+        }
     }
 
     /// 新开一局：建目录 + 建 `decisions.csv`（写列头）
@@ -450,7 +468,7 @@ impl OnlineRecorder {
         };
         let dir = self.logs_dir.join(&dir_name);
         if let Err(e) = fs::create_dir_all(&dir) {
-            warn!("创建局目录失败 {}: {e:?}", dir.display());
+            warn!("创建本局游戏记录目录失败 {}: {e:?}", dir.display());
         }
         let csv = match CsvSink::new(&dir.join("decisions.csv")) {
             Ok(mut c) => {
@@ -808,7 +826,10 @@ impl<S: DecisionSink> DecisionSink for RecordingSink<S> {
 
 #[cfg(test)]
 mod tests {
+    use std::io::Read;
+
     use umasim::output::EmptySink;
+    use zip::ZipArchive;
 
     use super::*;
 
@@ -1013,8 +1034,12 @@ mod tests {
     /// 立即写 meta（`end_reason=game_end`）+ 出图；随后切局不再重复写 meta
     #[test]
     fn test_recorder_end_turn_triggers_plot() {
-        let dir = std::env::temp_dir().join(format!("umaai_record_end_{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
+        // 路径白名单要求 logs_dir 末段为 logs：测试根在 <temp>/.../logs，
+        // 模拟生产里 OnlineRecorder 用 workspace/logs 的形态
+        let dir = std::env::temp_dir()
+            .join(format!("umaai_record_end_{}", std::process::id()))
+            .join("logs");
+        let _ = fs::remove_dir_all(dir.parent().unwrap());
         let mut rec = OnlineRecorder::new(dir.clone());
         let raw = |t: &str| {
             format!(
@@ -1044,21 +1069,40 @@ mod tests {
         let d = dir.join("game7075");
         assert!(d.join("game7075_turn77_2.json").exists(), "末回合第 2 份应为 _2 命名");
         rec.handle_turn_done();
-        assert!(d.join("luck_trend.svg").exists(), "77_2 处理完应立即出图");
+        // 77_2 处理完 → 出图 + 立即打包：原目录已被清理，svg 收纳进 zip
+        assert!(!d.exists(), "game_end 后原目录应已被打包清理");
 
-        let m: serde_json::Value =
-            serde_json::from_str(&fs::read_to_string(d.join("meta.json")).unwrap()).unwrap();
-        println!("末回合出图后的 meta: {m}");
-        assert_eq!(m["end_reason"], "game_end");
-        assert_eq!(m["decision_rows"], 2);
+        // game_end → 自动打包成 game7075.zip
+        let zip_path = dir.join("game7075.zip");
+        assert!(zip_path.exists(), "game_end 应自动生成 game7075.zip");
+
+        // 验证 zip 包内含 meta.json / luck_trend.svg / turn77_2.json（最小完整性检查）
+        let f = std::fs::File::open(&zip_path).unwrap();
+        let mut zip = ZipArchive::new(f).unwrap();
+        let names: Vec<String> = (0..zip.len())
+            .map(|i| zip.by_index(i).unwrap().name().to_string())
+            .collect();
+        println!("zip 包内条目: {names:?}");
+        for required in &["meta.json", "luck_trend.svg", "decisions.csv"] {
+            assert!(
+                names.iter().any(|n| n == required),
+                "zip 包内应含 {required}：{names:?}"
+            );
+        }
 
         // 切局到 7076：end_done → finalize 不再重写 meta（仍为 game_end）
         rec.handle_snapshot(&SnapMeta::normal(7076, 0, "Train"), &raw("0"));
-        let m2: serde_json::Value =
-            serde_json::from_str(&fs::read_to_string(d.join("meta.json")).unwrap()).unwrap();
+        // 原目录已被打包删除；meta.json 内容只能从 zip 里读
+        let f2 = std::fs::File::open(&zip_path).unwrap();
+        let mut zip2 = ZipArchive::new(f2).unwrap();
+        let mut meta_entry = zip2.by_name("meta.json").unwrap();
+        let mut s = String::new();
+        Read::read_to_string(&mut meta_entry, &mut s).unwrap();
+        let m2: serde_json::Value = serde_json::from_str(&s).unwrap();
         assert_eq!(m2["end_reason"], "game_end", "切局不应覆盖末回合已写的 end_reason");
 
-        let _ = fs::remove_dir_all(&dir);
+        // dir 父目录才是测试根（logs 的上一级）
+        let _ = fs::remove_dir_all(dir.parent().unwrap());
     }
 
     /// 中途停止（未触发末回合）→ 切局 / 退出兜底写 meta（switch）+ 出图
@@ -1079,6 +1123,9 @@ mod tests {
         println!("兜底 meta: {m}");
         assert_eq!(m["end_reason"], "switch");
         assert!(d.join("luck_trend.svg").exists(), "兜底也应出图");
+        // switch 兜底不打包：原目录与原文件保留，zip 不应存在
+        assert!(!dir.join("game7075.zip").exists(), "switch 兜底不应生成 zip");
+        assert!(d.exists(), "switch 兜底原目录应保留");
 
         let _ = fs::remove_dir_all(&dir);
     }
