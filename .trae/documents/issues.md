@@ -2,6 +2,18 @@
 
 本文件用于记载较复杂问题（需要用户协助解决的）的解决过程。
 
+## ga_lab 最优策略合并（2026-09-17）：组合交互 / weakboost 反模式 / 年度前瞻参数被支配
+
+- **日期**：2026-09-17
+- **状态**：已解决（已合入 preset 与默认卡组，待提交）
+- **问题描述**：把 ga_lab fork（479fb38）收敛的 GA 参数方向合并进本地 umaai-rs（70550cd）时，逐项"方向性拧参数"几乎全部无效——单项旋钮单独改动要么 0/60 局完全惰性（不翻转任何决策），要么轻微负收益。
+- **排查过程**：以通解卡组（速2耐1智2）为基座，逐项 + 组合档同种子配对（base_seed=61444 主样本 + seed=77777 独立复制，4 马 × 2 种子块）：
+  1. 单项臂全灭：trd3700/ck15/reserve55/rwc35 逐局逐位相同（Δ=0），cook34 −111，weakboost 0.5 单测 −1017（t=−4.83）；
+  2. 完整 10 旋钮组合档：+631（t=5.76）；去掉 weakboost 的 9 旋钮组合档：**+1394（t=12.55）**，8/8 个（马×种子块）单元全部显著——收益不来自任何单项，而是组合交互；
+  3. 年度前瞻三参数（rest_target_vital=70 / rmj_cross_bonus=150 / great_cross_bonus=100）扩成 12 旋钮再测：480 局配对 Δ=0；极端值 5000 探针仅 102601 2/60 局翻转——消费路径在（rest 打分被训练打分数量级支配；rmj/great 只在吃面选择加分、跨年成功线的面本就通常是最优），结论为"被支配的惰性旋钮"。
+- **解决方案**：采纳 9 旋钮组合档进 `RecommendedRamenTrainer::new()`（pt_tradeoff 16→37、pt_tradeoff_super 0→35、region_weak_cover_weight 查表→35 直值、region_youqing_weight 1.5→0.4、hint_bonus 6→8、max_base_score_sacrifice 140→200、ramen_window_weight 0.10→0.15、checkpoint_scale 0→0.15、Y1 pt_rate 16→56）；明确不采纳 weakboost 与年度前瞻三参数；默认卡组切 GA 通解骨架；`test_yearly_observability` 锚点重抓 68118→70138（五维同步），`test_ramen_three_stage_action_unchanged` 7 组 rollout 均值重抓。
+- **备注**：GA 方向合并正确姿势 = "组合档整体验证"而非逐项搬运——逐项 CRN 会系统性低估交互收益；bench_base 新增 `--deck` 入口用于配卡对照。
+
 ## 问题记录模板
 
 ```

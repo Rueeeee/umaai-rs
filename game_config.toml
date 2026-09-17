@@ -17,8 +17,8 @@ pt_favor_rate = 2.0
 num_threads = 16
 log_level = "info"
 
-uma = 101901
-cards = [302754, 303124, 303044, 302814, 303064, 303054]
+uma = 106402
+cards = [303174, 303124, 303044, 302894, 303064, 303054]
 blue_count = [15, 0, 0, 0, 3]
 
 # 训练员类型（可选覆盖 default_config.toml 的 trainer）

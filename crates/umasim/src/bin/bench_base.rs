@@ -96,6 +96,11 @@ struct BenchConfig {
     /// `None` = 正式 preset（0.0，弱位覆盖不加分）。与 `tokens` 互斥。
     #[serde(default)]
     region_weak_cover: Option<f32>,
+    /// 覆盖卡组：5/6 个支援卡 idrank（`"id1,id2,id3,id4,id5[,friend]"`，逗号分隔）。
+    /// 指定后跳过 preset builds，只跑这一组卡（表格标签 `custom_deck`），
+    /// 用于配卡对照实验（如"默认卡组 vs GA 通解"同种子配对）。
+    #[serde(default)]
+    deck: Option<String>,
     /// mcts 专用：激进度上限
     ///
     /// 缺省 **0.0**（取普通均值）而非 `SearchConfig::default()` 的 50.0：
@@ -145,6 +150,7 @@ impl Default for BenchConfig {
             search_ucb: default_search_ucb(),
             tokens: String::new(),
             region_weak_cover: None,
+            deck: None,
             radical_factor_max: 0.0
         }
     }
@@ -170,10 +176,12 @@ fn apply_cli(mut cfg: BenchConfig) -> Result<BenchConfig> {
             Arg::Long("region-weak-cover") => {
                 cfg.region_weak_cover = Some(bench::parse_value(&mut parser, "region-weak-cover")?)
             }
+            Arg::Long("deck") => cfg.deck = Some(bench::parse_value(&mut parser, "deck")?),
             Arg::Long("help") | Arg::Short('h') => {
                 println!(
                     "用法: bench_base [--runs N] [--seed S] [--log] [--out DIR]
 \n                     	[--trainer random|handwritten|mcts]
+\n                     	[--deck 「id1,id2,id3,id4,id5[,friend]」]（覆盖卡组，跳过 preset builds）
 \n                     	handwritten 专用: [--tokens TOKEN串]（如 --tokens rgn1 / rgn2 / reserve20）
 \n                     	                  [--region-weak-cover F]（覆盖地区弱位加分权重，与 --tokens 互斥）
 \n                     	mcts 专用: [--search-n N] [--search-stages train,ramen,...] [--search-ucb]
@@ -203,6 +211,26 @@ fn load_bench_config(workspace_root: &std::path::Path) -> Result<BenchConfig> {
         println!("提示: 未找到 bench_config.toml，使用内置默认参数");
         Ok(BenchConfig::default())
     }
+}
+
+/// 解析 `--deck` 覆盖串：`"id1,id2,id3,id4,id5[,friend]"`（idrank，逗号分隔）。
+/// 传 5 个时友人位用配置的 `friend`；传 6 个则第 6 个为友人。
+fn parse_deck_override(s: &str, friend: u32) -> Result<[u32; 6]> {
+    let v: Vec<u32> = s
+        .split(',')
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .map(|p| p.parse::<u32>())
+        .collect::<std::result::Result<_, _>>()?;
+    anyhow::ensure!(
+        v.len() == 5 || v.len() == 6,
+        "--deck 需要 5 个支援卡 idrank（友人可省略）或 6 个含友人，收到 {} 个: {s}",
+        v.len()
+    );
+    let mut deck = [0u32; 6];
+    deck[..5].copy_from_slice(&v[..5]);
+    deck[5] = if v.len() == 6 { v[5] } else { friend };
+    Ok(deck)
 }
 
 /// 按决策阶段分组统计耗时（mean us / max us / 次数），按阶段名排序
@@ -288,10 +316,18 @@ fn main() -> Result<()> {
     }
 
     let pick = CardPickOpts::default();
-    let mut all_results: Vec<BuildResults> = Vec::with_capacity(builds.len());
+    // --deck 覆盖模式：只跑一组自定义卡组；否则按 preset builds 自动拉卡
+    let deck_jobs: Vec<(String, [u32; 6])> = if let Some(ds) = &cfg.deck {
+        vec![("custom_deck".to_string(), parse_deck_override(ds, cfg.friend)?)]
+    } else {
+        builds
+            .iter()
+            .map(|b| Ok((b.name(), b.make_deck(&pick, cfg.friend)?)))
+            .collect::<Result<Vec<_>>>()?
+    };
+    let mut all_results: Vec<BuildResults> = Vec::with_capacity(deck_jobs.len());
     let mut all_rows: Vec<DecisionLogRow> = Vec::new();
-    for (idx, build) in builds.iter().enumerate() {
-        let deck = build.make_deck(&pick, cfg.friend)?;
+    for (idx, (build_name, deck)) in deck_jobs.iter().enumerate() {
         // 打印卡组信息（含卡名）
         let cards_desc = deck
             .iter()
@@ -301,7 +337,7 @@ fn main() -> Result<()> {
             })
             .collect::<Vec<_>>()
             .join(", ");
-        println!("[{}] {} 卡组: [{}]", idx + 1, build.name(), cards_desc);
+        println!("[{}] {} 卡组: [{}]", idx + 1, build_name, cards_desc);
 
         let mut outcomes = Vec::with_capacity(cfg.runs);
         for i in 0..cfg.runs {
@@ -319,13 +355,13 @@ fn main() -> Result<()> {
                         anyhow::bail!("--tokens 与 --region-weak-cover 互斥，不能同时指定");
                     }
                     let trainer = if let Some(w) = cfg.region_weak_cover {
-                        // 只覆盖地区弱位加分权重，其余 10 个实验参数取正式 preset 精确值：
-                        // pt_rates=[16,64,64] / gap=0.5 / overflow=0.5 / max_sacrifice=140 /
-                        // ramen_window=0.10 / reserve_max=40 / early_bond=8 / hint_bonus=6 /
-                        // weakboost=0（走查找表） / eat_requires_covered_train=true。
+                        // 只覆盖地区弱位加分权重，其余 10 个实验参数取正式 preset 精确值
+                        // （即 RecommendedRamenTrainer::new()，含 2026-09-17 GA 方向定稿：
+                        // pt_rates=[56,64,64] / pt_tradeoff=37 / weak_cover 直值 35 等），
+                        // 保证与 `new()` 的唯一差异就是本权重。
                         LoggingTrainer::new(
                             RecommendedRamenTrainer::with_experiment_overrides(
-                                [16.0, 64.0, 64.0], 0.5, 0.5, 140.0, 0.10, 40.0, 8.0, 6.0, 0.0, w, true
+                                [56.0, 64.0, 64.0], 0.5, 0.5, 200.0, 0.15, 40.0, 8.0, 8.0, 0.0, w, true
                             ),
                             log_seed
                         )
@@ -360,7 +396,7 @@ fn main() -> Result<()> {
                 outcome.elapsed_ms,
             );
             if cfg.decision_log {
-                log.save_to(&out_dir.join(format!("bench_base_decision_{}_{}.csv", build.name(), run_idx)))?;
+                log.save_to(&out_dir.join(format!("bench_base_decision_{}_{}.csv", build_name, run_idx)))?;
             }
             all_rows.extend(log.rows);
             outcomes.push(outcome);
@@ -372,7 +408,7 @@ fn main() -> Result<()> {
         let rmj_mean = outcomes.iter().map(|r| r.rmj_ok as f64).sum::<f64>() / outcomes.len().max(1) as f64;
         println!(
             "  {} 汇总: mean={:.0} median={:.0} min={:.0} max={:.0} std={:.0} RMJ={:.2}/3 自选比赛达标={:.0}%",
-            build.name(),
+            build_name,
             stats.mean,
             stats.median,
             stats.min,
@@ -381,7 +417,7 @@ fn main() -> Result<()> {
             rmj_mean,
             free_race_rate(&outcomes) * 100.0,
         );
-        all_results.push(BuildResults { name: build.name(), outcomes });
+        all_results.push(BuildResults { name: build_name.clone(), outcomes });
     }
 
     // ===== 落盘结果 CSV（合并单文件，build 列为第一列）=====

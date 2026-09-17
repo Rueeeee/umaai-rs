@@ -751,8 +751,11 @@ average = [1, 0, 1, 1, 2]
     // 2026-09-17 重抓：合宿训练诀窍全 MAX 修复（d9374e8）与近期策略调整后
     // 的当前行为（score/five）。改动前基线（63870 / [3337,2293,2200,1086,829]）
     // 在干净 master 上已过期（最近策略调优未同步重抓）。
-    const BASELINE_SCORE: i32 = 68118;
-    const BASELINE_FIVE: [i32; 5] = [3337, 2388, 1978, 1132, 1530];
+    // 2026-09-17 二次重抓：GA 方向 9 旋钮组合档定稿进入 preset（pt_rate Y1 56/
+    // pt_tradeoff 37/超拉面 35/弱位覆盖 35/友情 0.4/hint 8/max_sac 200/
+    // ramen_window 0.15/ck 0.15），同种子 68118→70138。
+    const BASELINE_SCORE: i32 = 70138;
+    const BASELINE_FIVE: [i32; 5] = [3337, 2445, 2200, 1246, 1348];
 
     /// 把三个地区 id 格式化成与决策日志 `action_desc` 相同的 `地区[a,b,c]`。
     fn region_desc(regions: [usize; 3]) -> String {

@@ -1965,9 +1965,21 @@ impl RecommendedRamenTrainer {
             local.friend_rest_max_special = 4;
             local.deadline_urgency_scale = 0.0;
             local.dynamic_special_targets = true;
-            // 已满位训练 PT 定价固化最优档：有彩圈 36（评分峰值，7 build×100 局 +533）、无彩圈 16（PT≈40 且属性 0，恒重压）
+            // 已满位训练 PT 定价：有彩圈 36（评分峰值，7 build×100 局 +533）；无彩圈档由下方 GA 方向上调（16→37）
             policy.pt_tradeoff_shining = 36.0;
-            policy.pt_tradeoff = 16.0;
+            // ===== GA 方向定稿（2026-09-17 ga_lab 合并，9 旋钮组合档）=====
+            // 来源：ga_lab fork (479fb38) 跨轮一致 GA 方向；本地 CRN 配对验证
+            // （4 马 × 2 种子块 = 420 局配对，组合档 Δ=+1394 t=12.55，8/8 单元显著）。
+            // 注意：单项均≤0/惰性，收益来自组合交互；weakboost(ramen_weak_train_boost)
+            // 单独 -1017 且拖累组合 → 明确不采纳。
+            policy.pt_tradeoff = 37.0;              // 满位普通档 16→37（GA 100% 上调）覆盖上行定稿
+            policy.pt_tradeoff_super = 35.0;        // 超拉面回合 0→35（GA 97%）
+            policy.region_weak_cover_weight = 35.0; // 弱位覆盖 查表→35（GA 97%；>0 直值）
+            policy.region_youqing_weight = 0.4;     // 友情词条 1.5→0.4（GA top 100% 降）
+            local.hint_bonus = 8.0;                 // 掌握度 6→8
+            local.max_base_score_sacrifice = 200.0; // 140→200
+            local.ramen_window_weight = 0.15;       // 0.10→0.15
+            local.checkpoint_scale = 0.15;          // 剧本PT前瞻 0→0.15
             LocalRamenTrainer::with_configs(policy, local)
         }
 
@@ -1975,7 +1987,7 @@ impl RecommendedRamenTrainer {
             // 回合级体力门限：不吃面回合统一 40（base_seed=61444 配对 100 局扫描峰值，
             // 30→40 总加权 +318；45 回落——门限过高休息过多）；吃面回合仅第三年放掉
             // （Y3 fail_rate_drop=100% 必成），第一/二年保留 40（Y1/Y2 吃面训练仍可能失败）。
-            years: [make(16.0, 40, 40), make(64.0, 40, 40), make(64.0, 40, 0)],
+            years: [make(56.0, 40, 40), make(64.0, 40, 40), make(64.0, 40, 0)],
             last_year: Mutex::new(None),
             record_last_year: true
         }
