@@ -464,6 +464,29 @@ impl RamenPolicy {
                 return Ok(idx);
             }
         }
+        // 豁免带内（vital ∈ [wisdom_vital_floor, rest_threshold)）：**不是**把整个
+        // 门放给全部动作，而是只放行 智训练 / 休息 / 普通外出 / 治病 参与打分，
+        // 其余训练位（速/耐/力/根）与自由比赛仍视为被体力门限拦截。理由：速/耐等
+        // 位失败率体力阈值 ~50-54，30-40 体力下失败率 20-30%，线性失败期望低估
+        // 大失败尾部与失败回合浪费，实测整门放开扫参大亏（2026-09，见 issues.md）。
+        if wisdom_exempt {
+            // 先全量打分（保持 eval_cache 预填契约——LocalRamenTrainer B2 依赖
+            // 全部训练位 eval 已填），再按白名单把其余候选压到最低分：
+            // 豁免带内只允许 智训练 / 休息 / 普通外出 / 治病 取胜。
+            scores.clear();
+            self.score_train_actions_cached(game, actions, ramen, eval_cache, scores)?;
+            for (a, o) in actions.iter().zip(scores.iter_mut()) {
+                let allowed = match a.operation {
+                    Operation::Train(t) => t as usize == 4,
+                    Operation::Rest | Operation::NormalOuting | Operation::Clinic => true,
+                    _ => false
+                };
+                if !allowed {
+                    o.score = f32::MIN;
+                }
+            }
+            return Ok(argmax_index(scores));
+        }
         // 守门 3：心情低 → 外出（回干劲）
         if uma.motivation < self.config.motivation_outing {
             if let Some(idx) = actions

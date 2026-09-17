@@ -1812,6 +1812,24 @@ impl RecommendedRamenTrainer {
                 for year in trainer.years.iter_mut() {
                     year.policy.config.cap_discount_weight = weight;
                 }
+            } else if let Some(v) = token.strip_prefix("trdsh") {
+                // 已满位训练有彩圈 PT 定价（N/100，见 RamenPolicyConfig::pt_tradeoff_shining）
+                let f: f32 = v.parse::<f32>()? / 100.0;
+                for year in trainer.years.iter_mut() {
+                    year.policy.config.pt_tradeoff_shining = f;
+                }
+            } else if let Some(v) = token.strip_prefix("trds") {
+                // 超级拉面回合（72-77）已满位 PT 定价（N/100，见 pt_tradeoff_super）
+                let f: f32 = v.parse::<f32>()? / 100.0;
+                for year in trainer.years.iter_mut() {
+                    year.policy.config.pt_tradeoff_super = f;
+                }
+            } else if let Some(v) = token.strip_prefix("trd") {
+                // 已满位训练普通档 PT 定价（N/100，见 RamenPolicyConfig::pt_tradeoff）
+                let f: f32 = v.parse::<f32>()? / 100.0;
+                for year in trainer.years.iter_mut() {
+                    year.policy.config.pt_tradeoff = f;
+                }
             } else if let Some(v) = token.strip_prefix("ck") {
                 let scale: f32 = v.parse::<f32>()? / 100.0;
                 for year in trainer.years.iter_mut() {
@@ -3286,6 +3304,24 @@ mod tests {
         println!("LocalRamenTrainer::select_action  n/a [含整段打分链路]");
         println!("\n注意：reserve_penalty 是 LocalRamenTrainer private 方法，从外部不可直测。");
         println!("select_action 总耗时 - reserve_penalty 预估 ≈ 其他打分项。");
+    }
+
+    #[test]
+    fn test_with_tokens_tradeoff_parsing() -> anyhow::Result<()> {
+        // trd / trdsh / trds = N/100 刻度（与 9/14 扫参 trd1600/trdsh3600 命名一致）
+        let t = RecommendedRamenTrainer::with_tokens("trd800")?;
+        println!("trd800 → pt_tradeoff={}", t.years[0].policy.config.pt_tradeoff);
+        assert_eq!(t.years[0].policy.config.pt_tradeoff, 8.0);
+        let t = RecommendedRamenTrainer::with_tokens("trdsh3000")?;
+        println!("trdsh3000 → pt_tradeoff_shining={}", t.years[0].policy.config.pt_tradeoff_shining);
+        assert_eq!(t.years[0].policy.config.pt_tradeoff_shining, 30.0);
+        let t = RecommendedRamenTrainer::with_tokens("trds2400")?;
+        println!("trds2400 → pt_tradeoff_super={}", t.years[0].policy.config.pt_tradeoff_super);
+        assert_eq!(t.years[0].policy.config.pt_tradeoff_super, 24.0);
+        let bad = RecommendedRamenTrainer::with_tokens("trdxx");
+        println!("未知 token trdxx 是否报错: {}", bad.is_err());
+        assert!(bad.is_err(), "无法解析的 trd 值必须报错");
+        Ok(())
     }
 }
 
