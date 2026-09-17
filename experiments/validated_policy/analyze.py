@@ -42,7 +42,7 @@ def analyze(manifest_path, csv_path):
         if identity != expected_identity or row["rule_seed"] != base["rule_seed"]:
             raise ValueError("Manifest identity or paired rule seed mismatch")
     results = {}
-    refs = ["base", "ptblend200", "ptblend200-capd0-rgn1"]
+    refs = ["base", "ptblend200", "ptblend200-capd0-rgn1", "ptblend200-capd0-rgn1-supermode3"]
     for variant in manifest["variants"]:
         if variant == "base":
             continue
@@ -74,7 +74,8 @@ def analyze(manifest_path, csv_path):
     print("Complete paired simulations:", len(rows))
     for variant, refs in results.items():
         for ref, groups in refs.items():
-            if variant not in ["ptblend200-capd0-rgn1", "ptblend200-capd0-rgn1-supermode3"]:
+            if variant not in ["ptblend200-capd0-rgn1", "ptblend200-capd0-rgn1-supermode3",
+                "ptblend200-capd0-rgn1-supermode3-hintlv600"]:
                 continue
             print(variant, "vs", ref)
             for cohort in ["fixed", "preset", "random"]:

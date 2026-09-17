@@ -28,6 +28,29 @@ supermode3 相对前一组合的增量及近似95%区间：固定+10.62 [-34.78,
 
 冻结后跨4位马娘复核：随机64副、共38,400配对局，supermode3额外+151.84 [+94.65, +209.02]；固定600局为-21.73 [-55.76, +12.30]。固定组未证实额外收益，模拟结果不能直接当作线上实战或 MCTS 决策收益。
 
+## 追加候选：逐卡 Hint 精确估值（hintlv600）
+
+训练成功且该训练位有带 Hint 人头时，模拟器必然推送 1 个 Hint 事件：25% 走属性事件，其余给 min(5, 1 + 卡面 hintLevel) 级 Hint（再受每卡上限截断），每级在终局折算 13 分（hint_pt_rate × pt_score_rate = 6.5 × 2.0）。原策略用固定 hint_bonus=8 覆盖整项，读不到卡面等级，1～6 级 Hint 一律同价。`hintlvW` 用逐人头精确期望替换该项，卡面 Hint 已满时只保留属性分支，默认关闭。
+
+另一批全新卡组（160 副随机卡组与本文筛选、验收池零重叠，rule 种子 918700000 起）× 300 局同种子配对：
+
+| 组合 | 固定卡组 | 7副预设 | 160副随机卡组×300局 |
+|---|---:|---:|---:|
+| ptblend200-capd0-rgn1-supermode3 | +269.3 | +300.2 | +232.0 [+190.5, +273.5] |
+| 再加 hintlv600 | +148.3 [-45.4, +342.1] | +378.0 [+307.1, +448.8] | +406.0 [+357.4, +454.6] |
+
+hintlv600 相对 supermode3 的增量：固定 −121.0 [-296.0, +54.0]（区间含零）、预设 +77.7 [+12.4, +143.0]、随机 +174.0 [+153.0, +195.0]（random_diverse +284.7、random_narrow +146.3）。160 副随机卡组中 8 副相对 base 退步，最差 −130.8 分，随机组技能 PT 平均 −46.3。固定卡组落后，是本项定位为“随机卡组可选”的原因，限制与 supermode3 相同。
+
+复现（冻结清单 `hintlv.json`，base / supermode3 / hintlv600 三臂）：
+
+~~~powershell
+./target/release/policy_pair_bench.exe experiments/validated_policy/hintlv.json target/hintlv.csv
+python experiments/validated_policy/analyze.py analyze experiments/validated_policy/hintlv.json target/hintlv.csv
+~~~
+
+同批的另一项候选（按该位历史点击频率估计未来点击次数的等级前瞻）在筛选阶段不显著，未纳入本 PR。
+
+
 ## 配对与抽样
 
 每个候选与对照使用相同卡组、马娘、继承和 rule_master；异常保留、不补采。筛选与独立验收的普通卡身份分池，候选冻结后不再依据验收调参。

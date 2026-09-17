@@ -337,6 +337,12 @@ pub struct LocalRamenConfig {
     /// RMJ/第三年5000目标在截止前的可达性紧迫度。
     pub deadline_urgency_scale: f32,
 
+    /// 实验（第八轮）：逐卡 Hint 精确估值倍率（百分比）。
+    ///
+    /// 0.0 = 关闭，沿用固定 hint_bonus；正数 = 用 P/100 x hint_event_expected_value
+    /// 替换固定值，让卡面 hint_level 0~5（1~6 级 Hint）与属性分支按终局评分真实折算。
+    pub hint_card_aware: f32,
+
     /// SpecialSelect 是否按吃后库存、后续可制作集合和年末剩余价值动态选择。
     pub dynamic_special_targets: bool
 }
@@ -392,7 +398,8 @@ impl Default for LocalRamenConfig {
             friend_outing_cumulative_caps: [5, 5, 5],
             friend_rest_max_special: 4,
             deadline_urgency_scale: 0.0,
-            dynamic_special_targets: false
+            dynamic_special_targets: false,
+            hint_card_aware: 0.0
         }
     }
 }
@@ -880,6 +887,51 @@ impl LocalRamenTrainer {
         Ok(best.unwrap_or((0, 0.0)))
     }
 
+    /// 单个带 Hint 人头的价值：默认固定 hint_bonus，启用第八轮实验后按精确模型折算。
+    fn hint_person_value(&self, g: &RamenGame, person_index: usize, tr: usize) -> f32 {
+        if self.config.hint_card_aware > 0.0 {
+            self.config.hint_card_aware * self.hint_event_expected_value(g, person_index, tr)
+        } else {
+            self.config.hint_bonus
+        }
+    }
+
+    /// 单次 Hint 事件的期望终局评分（第八轮实验，见 LocalRamenConfig::hint_card_aware）。
+    ///
+    /// 规则层（RamenGame::handle_hint_event -> push_hint_event）在训练成功且人头带 Hint
+    /// 时必然推 1 个事件（hint_count_bonus 另按次数计）：event_probs.hint_attr = 0.25 走
+    /// 属性事件 hint_event_value[train]，其余走技能事件，给 min(5, 1 + 卡面 hint_level)
+    /// 级 Hint（再受 max_hint_per_card - total_hints 截断；等级 <= 0 时只推属性事件）。
+    ///
+    /// 两者都按终局评分折算：属性增量走 RamenPolicy::status_gain（与训练同一凹凸曲线），
+    /// Hint 等级走 hint_pt_rate x pt_score_rate（6.5 x 2.0 = 13 分/级，见 Uma::total_pt 与
+    /// Uma::score_parts）。固定 hint_bonus 无法表达卡面 hint_level 差异，也表达不了
+    /// “这一位现在还有几级 Hint 可拿”；本函数是逐人头精确模型，无卡人头按 1 级处理。
+    fn hint_event_expected_value(&self, g: &RamenGame, person_index: usize, tr: usize) -> f32 {
+        let cons = global!(GAMECONSTANTS);
+        let attr_prob = crate::utils::system_event_prob("hint_attr").unwrap_or(0.25) as f32;
+        let mut attr_value = 0.0;
+        if let Some(row) = cons.hint_event_value.get(tr) {
+            for (i, &inc) in row.iter().take(5).enumerate() {
+                if inc > 0 {
+                    attr_value += self.policy.status_gain(g, i, inc);
+                }
+            }
+        }
+        let levels = match Game::deck_index_of(g, person_index) {
+            Some(di) => (1 + g.deck()[di].card_value().hint_level)
+                .min(5)
+                .min(cons.max_hint_per_card - g.deck()[di].total_hints),
+            None => 1
+        };
+        if levels <= 0 {
+            // 卡面 Hint 已满：规则层只推属性事件。
+            return attr_value;
+        }
+        let per_level = cons.hint_pt_rate * cons.pt_score_rate;
+        attr_value * attr_prob + (1.0 - attr_prob) * levels as f32 * per_level
+    }
+
     /// 按原人头顺序计算羁绊与 Hint 的长远价值，隐藏 Hint 模式由当前训练位决定。
     fn train_long_term(&self, g: &RamenGame, tr: usize, all_hint: bool) -> f32 {
         let ph = Self::phase(g.turn());
@@ -924,7 +976,7 @@ impl LocalRamenTrainer {
                         } else {
                             1
                         };
-                        lt += self.config.hint_bonus * hp * repeats as f32
+                        lt += self.hint_person_value(g, i, tr) * hp * repeats as f32
                     }
                 }
                 PersonType::Card if x.hint() => {
@@ -933,7 +985,7 @@ impl LocalRamenTrainer {
                     } else {
                         1
                     };
-                    lt += self.config.hint_bonus * hp * repeats as f32
+                    lt += self.hint_person_value(g, i, tr) * hp * repeats as f32
                 }
                 _ => {}
             }
@@ -1797,6 +1849,7 @@ impl RecommendedRamenTrainer {
     /// - `base`：无覆盖（对照）
     /// - `supermodeN`：0默认二，1固定一，2固定三，3按终盘缺口和卡数选范围。
     /// - `ptblendN`：近上限 PT 连续定价窗口 N/100 次训练，0 关闭（实验）。
+    /// - `hintlvN`：逐卡 Hint 精确估值倍率 = N/100，0 关闭（实验；见 [`LocalRamenConfig::hint_card_aware`]）。
     ///
     /// 未识别 token 直接报错，防止实验名拼错静默跑成 base。
     pub fn with_tokens(tokens: &str) -> Result<Self> {
@@ -1907,6 +1960,12 @@ impl RecommendedRamenTrainer {
                 }
                 for year in trainer.years.iter_mut() {
                     year.config.reserve_gain_mode = mode;
+                }
+            } else if let Some(v) = token.strip_prefix("hintlv") {
+                let weight = v.parse::<f32>()? / 100.0;
+                anyhow::ensure!(weight.is_finite() && (0.0..=10.0).contains(&weight), "hintlv 必须在 0..=1000");
+                for year in trainer.years.iter_mut() {
+                    year.config.hint_card_aware = weight;
                 }
             } else {
                 anyhow::bail!("未知 token: {token}（完整: {tokens}）");
@@ -3382,6 +3441,62 @@ mod tests {
             else { c.check(old>new,"溢出增量不再被重复惩罚"); }
         }
         c.finish()
+    }
+
+    /// 第八轮实验：逐卡 Hint 精确估值（token hintlvW）的 token 隔离、非法值与数值方向检查。
+    #[test]
+    fn test_round8_hint_card_aware() -> anyhow::Result<()> {
+        use crate::utils::Checks;
+        use crate::{
+            game::{InheritInfo, ramen::RamenGame},
+            gamedata::init_global,
+            utils::{get_workspace_root, init_test_logger}
+        };
+
+        let workspace_root = get_workspace_root()?;
+        std::env::set_current_dir(workspace_root)?;
+        let _ = init_test_logger("error");
+        let _ = init_global();
+
+        let base = RecommendedRamenTrainer::new();
+        let variant = RecommendedRamenTrainer::with_tokens("hintlv100")?;
+        let mut checks = Checks::new();
+        for year in 0..3 {
+            let got = &variant.years[year].config;
+            checks.check(base.years[year].config.hint_card_aware == 0.0, "默认关闭逐卡 Hint 估值");
+            checks.check(got.hint_card_aware == 1.0, "hintlv 写入三年");
+            checks.check(got.hint_bonus == base.years[year].config.hint_bonus
+                && got.max_base_score_sacrifice == base.years[year].config.max_base_score_sacrifice
+                && got.eat_requires_covered_train == base.years[year].config.eat_requires_covered_train,
+                "hintlv 不改动其他本地字段");
+        }
+        for bad in ["hintlvNaN", "hintlv-1", "hintlv1001"] {
+            checks.check(RecommendedRamenTrainer::with_tokens(bad).is_err(), "非法实验值报错");
+        }
+
+        // 满属性下属性分支为 0：每个带 Hint 人头的价值 = 0.75 x 等级 x (6.5 x 2.0)。
+        let mut game = RamenGame::newgame(
+            102601,
+            &[302424, 302894, 303044, 302924, 303024, 303054],
+            InheritInfo { blue_count: [15, 3, 0, 0, 0], extra_count: [0, 30, 0, 0, 30, 30] }
+        )?;
+        for i in 0..5 {
+            game.uma.five_status[i] = game.uma.five_status_limit[i];
+        }
+        let on = &variant.years[2];
+        let off = &base.years[2];
+        let mut multi = false;
+        for person_index in 0..game.base.deck.len() {
+            let levels = (1 + game.base.deck[person_index].card_value().hint_level).min(5);
+            let got = on.hint_event_expected_value(&game, person_index, 0);
+            let want = 0.75 * levels as f32 * 6.5 * 2.0;
+            println!("card {person_index} hintLv={levels} value={got}");
+            checks.check((got - want).abs() < 0.01, "满属性下只剩技能分支");
+            checks.check(off.hint_person_value(&game, person_index, 0) == off.config.hint_bonus, "关闭时沿用固定值");
+            multi |= levels > 1;
+        }
+        checks.check(multi, "固定卡组存在多级 Hint 卡面");
+        checks.finish()
     }
 
     /// 实验参数仅改变三年的连续窗口，默认关闭且拒绝越界/非有限值。
