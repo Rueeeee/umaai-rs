@@ -14,7 +14,9 @@
 - **重抓两个存量漂移基线**：`test_ramen_three_stage_action_unchanged`（7 组期望均值）与 `test_yearly_observability`（BASELINE_SCORE/FIVE）——最近策略调整与合宿诀窍修复后当前行为（干净 master 亦红，score/five 与本次改动逐位无关，纯同步）
 
 ## 2026-09-18
+- **跨 commit CPU 耗时监测工具链**：新增 `perf_probe` bin（固定 Train 根整根搜索耗时 + 手写整局耗时，输出含根局面真实评分 `root_score` 记录两版评分区别）与 `scripts/bench_commit_compare.py`（worktree 检出两版构建、逐轮交替配对、probe/bench 双模式自动选择、gamedata 与搜索工作量一致性守卫、逐步 run.log）；`project_context.md` 新增「性能监测」节记录用法
 - **局末自动打包本局游戏记录**：umaai 末回合第 2 份快照（拉面 `turn77_2`）处理完写 meta + SVG 后，把 `logs/game{id}/` 打成 `logs/game{id}.zip`（包内条目相对原目录，去掉 `game{id}/` 外壳）并清理原目录——zip crate 依赖进 workspace；切局/退出兜底（`switch` / `process_exit`）不打包，中途停止局保留原目录方便人工排查；终端 stderr 绿色绝对路径（dunce 去 `\\?\`）+ `info!` 日志一份（json 模式友好）
+- **文档整理（重构完成后）**：完成重构的方案/草案文档移入 `.trae/documents/archive/`（拉面重构开发计划 / 上游三层架构建议 / main.rs 拆分 / RNG 重构 v2 / 在线对接计划 / AIRedirector 集成 / adapter_spec / handwritten_policy）；`project_context.md` 按 umasim/umaai 现状全面重写（模块结构、三流 RNG、搜索层、trainer 家族、config 五子结构、通道层细节）；AGENTS.md 相关文档链接同步为 archive 路径
 
 ## 2026-09-16
 - **第3年地区单/多点整局配对扫描**：新增 `region_y3_single_focus` 扫参入口；seed42×100 全 101 构成 + seed61444×50 复测——混合档显著负、纯单点档玩家真实 build 大亏（≈−1100，t≈−5）→ 不采纳，维持现有按 build 自适应公式
