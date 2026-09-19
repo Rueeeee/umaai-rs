@@ -17,7 +17,9 @@
 - [glossary.md](.trae/documents/glossary.md)：术语表
 - [project_context.md](.trae/documents/project_context.md)：项目特定上下文（项目结构、配置文件、开发环境）
 - [ramen_memo_cn.md](.trae/documents/ramen_memo_cn.md)：拉面剧本备忘录（中文）
-- [ramen_refactor_development_plan.md](.trae/documents/ramen_refactor_development_plan.md)：拉面重构开发计划
+- [ramen_refactor_development_plan.md](.trae/documents/archive/ramen_refactor_development_plan.md)：拉面重构开发计划（已归档，重构已完成）
+- [tests_overview.md](.trae/documents/tests_overview.md)：测试一览
+- [perf_profiling.md](.trae/documents/perf_profiling.md)：性能分析指南
 
 以及在项目中提交前需要更新的文档，有需要时可以载入：
 - [changelog.md](.trae/documents/changelog.md)：变更日志，更新内容需要包括由Agent和用户做的全部的修改，应简单概括修改的功能点和效果，不记入具体数据。同类修改项需要合并
